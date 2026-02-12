@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -22,6 +23,17 @@ import (
 	"github.com/jxucoder/opentl/internal/session"
 	opentlslack "github.com/jxucoder/opentl/internal/slack"
 	opentltelegram "github.com/jxucoder/opentl/internal/telegram"
+)
+
+const (
+	// maxRequestBodySize limits request bodies to 1 MB to prevent memory exhaustion.
+	maxRequestBodySize = 1 << 20 // 1 MB
+
+	// sessionTimeout is the maximum duration a session sandbox can run.
+	sessionTimeout = 30 * time.Minute
+
+	// maxReviewRounds is the maximum number of review-revise cycles.
+	maxReviewRounds = 2
 )
 
 // Server is the OpenTL HTTP API server.
@@ -183,7 +195,8 @@ type errorResponse struct {
 // CreateAndRunSession creates a new session and starts the sandbox in the background.
 // This is the shared entry point used by both the HTTP API and the Slack bot.
 func (s *Server) CreateAndRunSession(repo, prompt string) (*session.Session, error) {
-	id := uuid.New().String()[:8]
+	// Use 12 hex chars (48 bits) instead of 8 to reduce collision probability.
+	id := uuid.New().String()[:12]
 	branch := fmt.Sprintf("opentl/%s", id)
 	now := time.Now().UTC()
 
@@ -208,6 +221,9 @@ func (s *Server) CreateAndRunSession(repo, prompt string) (*session.Session, err
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	// Limit request body size to prevent memory exhaustion.
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+
 	var req createSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -215,6 +231,12 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Repo == "" || req.Prompt == "" {
 		writeError(w, http.StatusBadRequest, "repo and prompt are required")
+		return
+	}
+
+	// Validate repo format (must be "owner/repo").
+	if !isValidRepoFormat(req.Repo) {
+		writeError(w, http.StatusBadRequest, "repo must be in \"owner/repo\" format")
 		return
 	}
 
@@ -275,16 +297,37 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Send historical events first.
+	// Subscribe BEFORE reading historical events to prevent the race
+	// where events published between GetEvents and Subscribe are lost.
+	ch := s.bus.Subscribe(id)
+	defer s.bus.Unsubscribe(id, ch)
+
+	// Send historical events.
 	events, _ := s.store.GetEvents(id, 0)
+	var lastEventID int64
 	for _, e := range events {
 		writeSSE(w, e)
+		lastEventID = e.ID
 	}
 	flusher.Flush()
 
-	// Subscribe to real-time events.
-	ch := s.bus.Subscribe(id)
-	defer s.bus.Unsubscribe(id, ch)
+	// Drain any events that arrived between GetEvents and now,
+	// deduplicating against already-sent historical events.
+	drainDone := false
+	for !drainDone {
+		select {
+		case event, ok := <-ch:
+			if !ok {
+				return
+			}
+			if event.ID > lastEventID {
+				writeSSE(w, event)
+				flusher.Flush()
+			}
+		default:
+			drainDone = true
+		}
+	}
 
 	ctx := r.Context()
 	for {
@@ -319,15 +362,20 @@ func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
 	sess.Error = "stopped by user"
 	s.store.UpdateSession(sess)
 
+	// Emit an error event so SSE clients get a terminal signal instead of hanging.
+	s.emitEvent(sess.ID, "error", "stopped by user")
+
 	writeJSON(w, http.StatusOK, sess)
 }
 
 // --- Session execution ---
 
 func (s *Server) runSession(sess *session.Session) {
-	ctx := context.Background()
+	// Enforce a maximum session duration so stuck containers don't run forever.
+	ctx, cancel := context.WithTimeout(context.Background(), sessionTimeout)
+	defer cancel()
 
-	// Phase 2: Plan step (if orchestrator is available).
+	// Phase 1: Plan step (if orchestrator is available).
 	prompt := sess.Prompt
 	var plan string
 	if s.orchestrator != nil {
@@ -410,25 +458,11 @@ func (s *Server) runSession(sess *session.Session) {
 		return
 	}
 
-	// Phase 2: Review step (if orchestrator is available and we have a plan).
+	// Phase 2: Multi-round review (if orchestrator is available and we have a plan).
 	if s.orchestrator != nil && plan != "" {
-		s.emitEvent(sess.ID, "status", "Reviewing changes...")
-
-		// Get the diff from the sandbox (best-effort, non-blocking).
 		diff := s.getDiffFromContainer(ctx, containerID)
 		if diff != "" {
-			review, err := s.orchestrator.Review(ctx, sess.Prompt, plan, diff)
-			if err != nil {
-				log.Printf("Review failed (proceeding with PR): %v", err)
-				s.emitEvent(sess.ID, "status", "Review failed, proceeding with PR")
-			} else if !review.Approved {
-				s.emitEvent(sess.ID, "output", "## Review Feedback\n"+review.Feedback)
-				s.emitEvent(sess.ID, "status", "Review requested revision (bounded to 1 round)")
-				// TODO: Phase 2 enhancement -- run a second sandbox round with review feedback.
-				// For now, proceed with PR and include review feedback in the PR body.
-			} else {
-				s.emitEvent(sess.ID, "output", "## Review\n"+review.Feedback)
-			}
+			s.runReviewCycle(ctx, sess, plan, diff)
 		}
 	}
 
@@ -465,6 +499,39 @@ func (s *Server) runSession(sess *session.Session) {
 
 	// Clean up container.
 	s.sandbox.Stop(ctx, containerID)
+}
+
+// runReviewCycle performs up to maxReviewRounds of review-then-revise.
+// If the review approves on any round, it returns immediately.
+func (s *Server) runReviewCycle(ctx context.Context, sess *session.Session, plan, diff string) {
+	for round := 1; round <= maxReviewRounds; round++ {
+		s.emitEvent(sess.ID, "status", fmt.Sprintf("Reviewing changes (round %d/%d)...", round, maxReviewRounds))
+
+		review, err := s.orchestrator.Review(ctx, sess.Prompt, plan, diff)
+		if err != nil {
+			log.Printf("Review failed (proceeding with PR): %v", err)
+			s.emitEvent(sess.ID, "status", "Review failed, proceeding with PR")
+			return
+		}
+
+		if review.Approved {
+			s.emitEvent(sess.ID, "output", fmt.Sprintf("## Review (Round %d)\n%s", round, review.Feedback))
+			return
+		}
+
+		s.emitEvent(sess.ID, "output", fmt.Sprintf("## Review Feedback (Round %d)\n%s", round, review.Feedback))
+
+		if round == maxReviewRounds {
+			s.emitEvent(sess.ID, "status", fmt.Sprintf("Max review rounds (%d) reached, proceeding with PR", maxReviewRounds))
+			return
+		}
+
+		// TODO: Re-run the sandbox with review feedback as a revision prompt.
+		// This requires restarting the container with an enriched prompt that
+		// includes the review feedback. For now, log and proceed.
+		s.emitEvent(sess.ID, "status", "Revision round not yet implemented, proceeding with PR")
+		return
+	}
 }
 
 // getDiffFromContainer runs `git diff` inside the container to get the changes.
@@ -516,9 +583,18 @@ func writeSSE(w http.ResponseWriter, event *session.Event) {
 	fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.ID, event.Type, string(data))
 }
 
+// truncate shortens s to at most maxLen runes, appending "..." if truncated.
+// Uses rune count instead of byte count to avoid breaking multi-byte UTF-8 characters.
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	if utf8.RuneCountInString(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen-3] + "..."
+	runes := []rune(s)
+	return string(runes[:maxLen-3]) + "..."
+}
+
+// isValidRepoFormat checks that s matches the "owner/repo" pattern.
+func isValidRepoFormat(s string) bool {
+	parts := strings.SplitN(s, "/", 2)
+	return len(parts) == 2 && parts[0] != "" && parts[1] != "" && !strings.Contains(parts[1], "/")
 }

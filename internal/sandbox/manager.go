@@ -5,7 +5,6 @@ import (
 	"bufio"
 	"context"
 	"fmt"
-	"io"
 	"os/exec"
 	"strings"
 )
@@ -19,7 +18,17 @@ type StartOptions struct {
 	Image     string   // Docker image name
 	Env       []string // additional environment variables
 	Network   string   // Docker network name
+
+	// Resource limits (optional, zero means no limit).
+	MemoryMB int // container memory limit in megabytes
+	CPUs     int // number of CPUs
 }
+
+// DefaultMemoryMB is the default container memory limit (2 GB).
+const DefaultMemoryMB = 2048
+
+// DefaultCPUs is the default CPU limit for sandbox containers.
+const DefaultCPUs = 2
 
 // Manager handles Docker sandbox lifecycle.
 type Manager struct{}
@@ -41,6 +50,20 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (string, error) 
 	if opts.Network != "" {
 		args = append(args, "--network", opts.Network)
 	}
+
+	// Resource limits to prevent runaway containers.
+	memMB := opts.MemoryMB
+	if memMB <= 0 {
+		memMB = DefaultMemoryMB
+	}
+	args = append(args, "--memory", fmt.Sprintf("%dm", memMB))
+
+	cpus := opts.CPUs
+	if cpus <= 0 {
+		cpus = DefaultCPUs
+	}
+	args = append(args, "--cpus", fmt.Sprintf("%d", cpus))
+	args = append(args, "--pids-limit", "512")
 
 	// Environment variables
 	envVars := append(opts.Env,
@@ -66,25 +89,26 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (string, error) 
 	return containerID, nil
 }
 
-// StreamLogs attaches to a container's stdout and returns a line-by-line reader.
+// StreamLogs attaches to a container's stdout/stderr and returns a line-by-line reader.
+// It merges both streams concurrently using docker logs' native 2>&1 redirect so
+// stderr output is interleaved in real time rather than buffered until stdout closes.
 func (m *Manager) StreamLogs(ctx context.Context, containerID string) (*LineScanner, error) {
 	cmd := exec.CommandContext(ctx, "docker", "logs", "-f", containerID)
+
+	// Redirect stderr into stdout so both streams are merged at the source.
+	// This avoids the io.MultiReader sequential-read bug where stderr is
+	// delayed until stdout reaches EOF.
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("attaching stdout: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("attaching stderr: %w", err)
-	}
+	cmd.Stderr = cmd.Stdout
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("starting log stream: %w", err)
 	}
 
-	// Merge stdout and stderr into a single reader.
-	merged := io.MultiReader(stdout, stderr)
-	scanner := bufio.NewScanner(merged)
+	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
 
 	return &LineScanner{

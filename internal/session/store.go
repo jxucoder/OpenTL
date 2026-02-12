@@ -265,6 +265,7 @@ func (b *EventBus) Subscribe(sessionID string) chan *Event {
 }
 
 // Unsubscribe removes a channel from the session's subscribers.
+// It also cleans up the map entry when no subscribers remain.
 func (b *EventBus) Unsubscribe(sessionID string, ch chan *Event) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -272,8 +273,13 @@ func (b *EventBus) Unsubscribe(sessionID string, ch chan *Event) {
 	subs := b.subs[sessionID]
 	for i, s := range subs {
 		if s == ch {
-			b.subs[sessionID] = append(subs[:i], subs[i+1:]...)
+			subs = append(subs[:i], subs[i+1:]...)
 			close(ch)
+			if len(subs) == 0 {
+				delete(b.subs, sessionID)
+			} else {
+				b.subs[sessionID] = subs
+			}
 			return
 		}
 	}

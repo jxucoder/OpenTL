@@ -8,7 +8,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"time"
 )
+
+// llmHTTPTimeout is the maximum time to wait for an LLM API response.
+const llmHTTPTimeout = 5 * time.Minute
 
 // AnthropicClient implements LLMClient using the Anthropic Messages API.
 type AnthropicClient struct {
@@ -26,7 +30,7 @@ func NewAnthropicClient(apiKey, model string) *AnthropicClient {
 	return &AnthropicClient{
 		apiKey: apiKey,
 		model:  model,
-		client: http.DefaultClient,
+		client: &http.Client{Timeout: llmHTTPTimeout},
 	}
 }
 
@@ -102,7 +106,7 @@ func NewOpenAIClient(apiKey, model string) *OpenAIClient {
 	return &OpenAIClient{
 		apiKey: apiKey,
 		model:  model,
-		client: http.DefaultClient,
+		client: &http.Client{Timeout: llmHTTPTimeout},
 	}
 }
 

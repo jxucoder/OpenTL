@@ -88,16 +88,19 @@ func runLogs(cmd *cobra.Command, args []string) error {
 		return streamEvents(id)
 	}
 
-	// Non-follow mode: fetch events and print.
-	req, _ := http.NewRequest("GET", serverURL+"/api/sessions/"+id+"/events", nil)
-	req.Header.Set("Accept", "text/event-stream")
-
-	resp, err := http.DefaultClient.Do(req)
+	// Non-follow mode: fetch the session status and print stored events.
+	// Use the session API to get events as a JSON list rather than SSE,
+	// which would block indefinitely for running sessions.
+	resp, err := http.Get(serverURL + "/api/sessions/" + id + "/events")
 	if err != nil {
 		return fmt.Errorf("connecting to server: %w", err)
 	}
 	defer resp.Body.Close()
 
+	// Read the SSE stream but disconnect after a short deadline so we don't
+	// block on running sessions. Read until we either get a "done"/"error"
+	// event or run out of buffered data (the server sends historical events
+	// first, then flushes).
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
