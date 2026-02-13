@@ -87,7 +87,7 @@ func New(cfg *config.Config) (*Server, error) {
 			cfg.TelegramDefaultRepo,
 			s.store,
 			s.bus,
-			s, // Server implements telegram.SessionCreator
+			s, // Server implements telegram.ChatSessionCreator
 		)
 		if err != nil {
 			log.Printf("Warning: failed to initialize Telegram bot: %v", err)
@@ -106,6 +106,9 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := s.sandbox.EnsureNetwork(ctx, s.config.DockerNetwork); err != nil {
 		log.Printf("Warning: could not create Docker network: %v", err)
 	}
+
+	// Start idle chat session reaper.
+	go s.reapIdleChatSessions(ctx)
 
 	// Start chat bots in background if configured.
 	if s.slackBot != nil {
@@ -153,6 +156,9 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/sessions", s.handleListSessions)
 		r.Get("/sessions/{id}", s.handleGetSession)
 		r.Get("/sessions/{id}/events", s.handleSessionEvents)
+		r.Get("/sessions/{id}/messages", s.handleGetMessages)
+		r.Post("/sessions/{id}/messages", s.handleSendMessage)
+		r.Post("/sessions/{id}/pr", s.handleCreatePR)
 		r.Post("/sessions/{id}/stop", s.handleStopSession)
 	})
 
@@ -169,11 +175,27 @@ func (s *Server) buildRouter() chi.Router {
 type createSessionRequest struct {
 	Repo   string `json:"repo"`
 	Prompt string `json:"prompt"`
+	Mode   string `json:"mode,omitempty"` // "task" (default) or "chat"
 }
 
 type createSessionResponse struct {
 	ID     string `json:"id"`
 	Branch string `json:"branch"`
+	Mode   string `json:"mode"`
+}
+
+type sendMessageRequest struct {
+	Content string `json:"content"`
+}
+
+type sendMessageResponse struct {
+	MessageID int64  `json:"message_id"`
+	SessionID string `json:"session_id"`
+}
+
+type createPRResponse struct {
+	URL    string `json:"url"`
+	Number int    `json:"number"`
 }
 
 type errorResponse struct {
@@ -182,8 +204,8 @@ type errorResponse struct {
 
 // --- Handlers ---
 
-// CreateAndRunSession creates a new session and starts the sandbox in the background.
-// This is the shared entry point used by both the HTTP API and the Slack bot.
+// CreateAndRunSession creates a new task-mode session and starts the sandbox in the background.
+// This is the shared entry point used by the HTTP API and the Slack bot.
 func (s *Server) CreateAndRunSession(repo, prompt string) (*session.Session, error) {
 	id := uuid.New().String()[:8]
 	branch := fmt.Sprintf("opentl/%s", id)
@@ -193,6 +215,7 @@ func (s *Server) CreateAndRunSession(repo, prompt string) (*session.Session, err
 		ID:        id,
 		Repo:      repo,
 		Prompt:    prompt,
+		Mode:      session.ModeTask,
 		Status:    session.StatusPending,
 		Branch:    branch,
 		CreatedAt: now,
@@ -209,28 +232,336 @@ func (s *Server) CreateAndRunSession(repo, prompt string) (*session.Session, err
 	return sess, nil
 }
 
+// CreateChatSession creates a new chat-mode session with a persistent sandbox.
+// The sandbox stays alive between messages. Returns the session once the
+// sandbox is ready (repo cloned, deps installed).
+func (s *Server) CreateChatSession(repo string) (*session.Session, error) {
+	id := uuid.New().String()[:8]
+	branch := fmt.Sprintf("opentl/%s", id)
+	now := time.Now().UTC()
+
+	sess := &session.Session{
+		ID:        id,
+		Repo:      repo,
+		Prompt:    "", // No initial prompt for chat mode.
+		Mode:      session.ModeChat,
+		Status:    session.StatusPending,
+		Branch:    branch,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := s.store.CreateSession(sess); err != nil {
+		return nil, fmt.Errorf("creating session: %w", err)
+	}
+
+	// Start persistent sandbox in background and set up the repo.
+	go s.initChatSession(sess)
+
+	return sess, nil
+}
+
+// initChatSession starts a persistent container and runs setup.sh.
+func (s *Server) initChatSession(sess *session.Session) {
+	ctx := context.Background()
+
+	s.emitEvent(sess.ID, "status", "Starting sandbox...")
+
+	containerID, err := s.sandbox.StartPersistent(ctx, sandbox.StartOptions{
+		SessionID: sess.ID,
+		Repo:      sess.Repo,
+		Branch:    sess.Branch,
+		Image:     s.config.DockerImage,
+		Env:       s.config.SandboxEnv(),
+		Network:   s.config.DockerNetwork,
+	})
+	if err != nil {
+		s.failSession(sess, fmt.Sprintf("failed to start sandbox: %v", err))
+		return
+	}
+
+	sess.ContainerID = containerID
+	s.store.UpdateSession(sess)
+
+	// Run setup script (clone repo, install deps).
+	s.emitEvent(sess.ID, "status", "Setting up repository...")
+	setupStream, err := s.sandbox.Exec(ctx, containerID, []string{"/setup.sh"})
+	if err != nil {
+		s.failSession(sess, fmt.Sprintf("failed to run setup: %v", err))
+		return
+	}
+
+	for setupStream.Scan() {
+		line := setupStream.Text()
+		switch {
+		case strings.HasPrefix(line, "###OPENTL_STATUS### "):
+			msg := strings.TrimPrefix(line, "###OPENTL_STATUS### ")
+			s.emitEvent(sess.ID, "status", msg)
+		case strings.HasPrefix(line, "###OPENTL_ERROR### "):
+			msg := strings.TrimPrefix(line, "###OPENTL_ERROR### ")
+			s.emitEvent(sess.ID, "error", msg)
+		default:
+			s.emitEvent(sess.ID, "output", line)
+		}
+	}
+	setupStream.Close()
+
+	// Mark session as idle (ready for messages).
+	sess.Status = session.StatusIdle
+	s.store.UpdateSession(sess)
+	s.emitEvent(sess.ID, "status", "Ready — send a message to start coding")
+}
+
+// reapIdleChatSessions periodically stops chat sandboxes that have been idle
+// longer than ChatIdleTimeout.
+func (s *Server) reapIdleChatSessions(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sessions, err := s.store.ListSessions()
+			if err != nil {
+				continue
+			}
+			for _, sess := range sessions {
+				if sess.Mode != session.ModeChat || sess.Status != session.StatusIdle {
+					continue
+				}
+				if time.Since(sess.UpdatedAt) > s.config.ChatIdleTimeout {
+					log.Printf("Reaping idle chat session %s (idle for %v)", sess.ID, time.Since(sess.UpdatedAt))
+					if sess.ContainerID != "" {
+						s.sandbox.Stop(ctx, sess.ContainerID)
+					}
+					sess.Status = session.StatusError
+					sess.Error = "session timed out due to inactivity"
+					s.store.UpdateSession(sess)
+					s.emitEvent(sess.ID, "status", "Session stopped (idle timeout)")
+				}
+			}
+		}
+	}
+}
+
+// SendChatMessage sends a user message to a chat session and runs the agent.
+// Returns the stored message or an error.
+func (s *Server) SendChatMessage(sessionID, content string) (*session.Message, error) {
+	sess, err := s.store.GetSession(sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session not found: %w", err)
+	}
+	if sess.Mode != session.ModeChat {
+		return nil, fmt.Errorf("session %s is not a chat session", sessionID)
+	}
+	if sess.Status != session.StatusIdle {
+		return nil, fmt.Errorf("session is %s, not idle (wait for current operation to finish)", sess.Status)
+	}
+	if sess.ContainerID == "" {
+		return nil, fmt.Errorf("session has no container")
+	}
+
+	// Check message limit.
+	msgs, _ := s.store.GetMessages(sessionID)
+	userMsgCount := 0
+	for _, m := range msgs {
+		if m.Role == "user" {
+			userMsgCount++
+		}
+	}
+	if userMsgCount >= s.config.ChatMaxMessages {
+		return nil, fmt.Errorf("message limit reached (%d messages)", s.config.ChatMaxMessages)
+	}
+
+	// Store the user message.
+	msg := &session.Message{
+		SessionID: sessionID,
+		Role:      "user",
+		Content:   content,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := s.store.AddMessage(msg); err != nil {
+		return nil, fmt.Errorf("storing message: %w", err)
+	}
+
+	// Run the agent in the background.
+	go s.runChatMessage(sess, msg)
+
+	return msg, nil
+}
+
+// runChatMessage executes the coding agent for a single chat message.
+func (s *Server) runChatMessage(sess *session.Session, msg *session.Message) {
+	ctx := context.Background()
+
+	// Mark session as running.
+	sess.Status = session.StatusRunning
+	s.store.UpdateSession(sess)
+	s.emitEvent(sess.ID, "status", "Running agent...")
+
+	// Run the coding agent with the user's message.
+	agentStream, err := s.sandbox.Exec(ctx, sess.ContainerID, []string{
+		"bash", "-c",
+		fmt.Sprintf("cd /workspace/repo && opencode -p %q 2>&1", msg.Content),
+	})
+	if err != nil {
+		log.Printf("Chat message exec failed: %v", err)
+		s.emitEvent(sess.ID, "error", fmt.Sprintf("Agent failed to start: %v", err))
+		sess.Status = session.StatusIdle
+		s.store.UpdateSession(sess)
+		return
+	}
+
+	var outputLines []string
+	for agentStream.Scan() {
+		line := agentStream.Text()
+		outputLines = append(outputLines, line)
+		s.emitEvent(sess.ID, "output", line)
+	}
+	agentStream.Close()
+
+	// Store the assistant response.
+	assistantContent := strings.Join(outputLines, "\n")
+	if assistantContent == "" {
+		assistantContent = "(no output)"
+	}
+	assistantMsg := &session.Message{
+		SessionID: sess.ID,
+		Role:      "assistant",
+		Content:   assistantContent,
+		CreatedAt: time.Now().UTC(),
+	}
+	s.store.AddMessage(assistantMsg)
+
+	// Mark session as idle (ready for next message).
+	sess.Status = session.StatusIdle
+	s.store.UpdateSession(sess)
+	s.emitEvent(sess.ID, "status", "Ready")
+}
+
+// CreatePRFromChat commits all changes in a chat session and creates a PR.
+func (s *Server) CreatePRFromChat(sessionID string) (string, int, error) {
+	sess, err := s.store.GetSession(sessionID)
+	if err != nil {
+		return "", 0, fmt.Errorf("session not found: %w", err)
+	}
+	if sess.Mode != session.ModeChat {
+		return "", 0, fmt.Errorf("session %s is not a chat session", sessionID)
+	}
+	if sess.Status != session.StatusIdle {
+		return "", 0, fmt.Errorf("session is %s, wait for it to be idle", sess.Status)
+	}
+	if sess.ContainerID == "" {
+		return "", 0, fmt.Errorf("session has no container")
+	}
+
+	ctx := context.Background()
+
+	s.emitEvent(sess.ID, "status", "Committing and pushing changes...")
+
+	// Build a commit message from the conversation.
+	msgs, _ := s.store.GetMessages(sessionID)
+	commitDesc := "chat session changes"
+	for _, m := range msgs {
+		if m.Role == "user" {
+			commitDesc = m.Content
+			break
+		}
+	}
+
+	if err := s.sandbox.CommitAndPush(ctx, sess.ContainerID, commitDesc, sess.Branch); err != nil {
+		return "", 0, fmt.Errorf("commit/push failed: %w", err)
+	}
+
+	s.emitEvent(sess.ID, "status", "Creating pull request...")
+
+	defaultBranch, err := s.github.GetDefaultBranch(ctx, sess.Repo)
+	if err != nil {
+		defaultBranch = "main"
+	}
+
+	prTitle := fmt.Sprintf("opentl: %s", truncate(commitDesc, 72))
+	prBody := fmt.Sprintf("## OpenTL Chat Session `%s`\n\n", sess.ID)
+	for _, m := range msgs {
+		if m.Role == "user" {
+			prBody += fmt.Sprintf("> **You:** %s\n\n", m.Content)
+		}
+	}
+	prBody += "---\n*Created by [OpenTL](https://github.com/jxucoder/opentl)*"
+
+	prURL, prNumber, err := s.github.CreatePR(ctx, github.PROptions{
+		Repo:   sess.Repo,
+		Branch: sess.Branch,
+		Base:   defaultBranch,
+		Title:  prTitle,
+		Body:   prBody,
+	})
+	if err != nil {
+		return "", 0, fmt.Errorf("failed to create PR: %w", err)
+	}
+
+	sess.PRUrl = prURL
+	sess.PRNumber = prNumber
+	sess.Status = session.StatusComplete
+	s.store.UpdateSession(sess)
+
+	s.emitEvent(sess.ID, "done", prURL)
+
+	return prURL, prNumber, nil
+}
+
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	var req createSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Repo == "" || req.Prompt == "" {
-		writeError(w, http.StatusBadRequest, "repo and prompt are required")
+	if req.Repo == "" {
+		writeError(w, http.StatusBadRequest, "repo is required")
 		return
 	}
 
-	sess, err := s.CreateAndRunSession(req.Repo, req.Prompt)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create session")
-		log.Printf("Error creating session: %v", err)
-		return
+	mode := req.Mode
+	if mode == "" {
+		mode = "task"
 	}
 
-	writeJSON(w, http.StatusCreated, createSessionResponse{
-		ID:     sess.ID,
-		Branch: sess.Branch,
-	})
+	switch mode {
+	case "chat":
+		sess, err := s.CreateChatSession(req.Repo)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create chat session")
+			log.Printf("Error creating chat session: %v", err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, createSessionResponse{
+			ID:     sess.ID,
+			Branch: sess.Branch,
+			Mode:   "chat",
+		})
+
+	case "task":
+		if req.Prompt == "" {
+			writeError(w, http.StatusBadRequest, "prompt is required for task mode")
+			return
+		}
+		sess, err := s.CreateAndRunSession(req.Repo, req.Prompt)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create session")
+			log.Printf("Error creating session: %v", err)
+			return
+		}
+		writeJSON(w, http.StatusCreated, createSessionResponse{
+			ID:     sess.ID,
+			Branch: sess.Branch,
+			Mode:   "task",
+		})
+
+	default:
+		writeError(w, http.StatusBadRequest, "mode must be 'task' or 'chat'")
+	}
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
@@ -322,6 +653,58 @@ func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
 	s.store.UpdateSession(sess)
 
 	writeJSON(w, http.StatusOK, sess)
+}
+
+// --- Chat session handlers ---
+
+func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req sendMessageRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Content == "" {
+		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+
+	msg, err := s.SendChatMessage(id, req.Content)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, sendMessageResponse{
+		MessageID: msg.ID,
+		SessionID: id,
+	})
+}
+
+func (s *Server) handleGetMessages(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	msgs, err := s.store.GetMessages(id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get messages")
+		return
+	}
+	if msgs == nil {
+		msgs = []*session.Message{}
+	}
+	writeJSON(w, http.StatusOK, msgs)
+}
+
+func (s *Server) handleCreatePR(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	prURL, prNumber, err := s.CreatePRFromChat(id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, createPRResponse{
+		URL:    prURL,
+		Number: prNumber,
+	})
 }
 
 // --- Session execution ---

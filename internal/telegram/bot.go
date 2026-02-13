@@ -1,7 +1,11 @@
 // Package telegram provides a Telegram bot integration for OpenTL.
 //
-// Uses long polling -- no public URL or webhook needed.
-// Send a message to the bot, get a PR back with full terminal output.
+// Supports two modes:
+//   - Task mode (fire-and-forget): /run <prompt> — creates a one-shot session, returns PR.
+//   - Chat mode (multi-turn): first message creates a persistent sandbox, subsequent
+//     messages are follow-ups. /pr creates the PR when you're ready.
+//
+// Uses long polling — no public URL or webhook needed.
 package telegram
 
 import (
@@ -9,6 +13,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -16,9 +21,20 @@ import (
 	"github.com/jxucoder/opentl/internal/session"
 )
 
-// SessionCreator is the interface used to create and run sessions.
-type SessionCreator interface {
+// ChatSessionCreator is the interface the server implements for chat sessions.
+type ChatSessionCreator interface {
+	// Task mode (legacy).
 	CreateAndRunSession(repo, prompt string) (*session.Session, error)
+	// Chat mode.
+	CreateChatSession(repo string) (*session.Session, error)
+	SendChatMessage(sessionID, content string) (*session.Message, error)
+	CreatePRFromChat(sessionID string) (string, int, error)
+}
+
+// chatState tracks the active chat session for a Telegram chat.
+type chatState struct {
+	sessionID string
+	repo      string
 }
 
 // Bot is the Telegram bot for OpenTL.
@@ -26,12 +42,16 @@ type Bot struct {
 	api         *tgbotapi.BotAPI
 	store       *session.Store
 	bus         *session.EventBus
-	sessions    SessionCreator
+	sessions    ChatSessionCreator
 	defaultRepo string
+
+	// chatSessions maps Telegram chatID -> active chat state.
+	chatMu       sync.RWMutex
+	chatSessions map[int64]*chatState
 }
 
 // NewBot creates a new Telegram bot.
-func NewBot(token, defaultRepo string, store *session.Store, bus *session.EventBus, creator SessionCreator) (*Bot, error) {
+func NewBot(token, defaultRepo string, store *session.Store, bus *session.EventBus, creator ChatSessionCreator) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("creating Telegram bot: %w", err)
@@ -40,11 +60,12 @@ func NewBot(token, defaultRepo string, store *session.Store, bus *session.EventB
 	log.Printf("Telegram bot authorized as @%s", api.Self.UserName)
 
 	return &Bot{
-		api:         api,
-		store:       store,
-		bus:         bus,
-		sessions:    creator,
-		defaultRepo: defaultRepo,
+		api:          api,
+		store:        store,
+		bus:          bus,
+		sessions:     creator,
+		defaultRepo:  defaultRepo,
+		chatSessions: make(map[int64]*chatState),
 	}, nil
 }
 
@@ -73,31 +94,310 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 }
 
-// handleMessage processes an incoming message.
+// handleMessage routes incoming messages to the appropriate handler.
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	text := strings.TrimSpace(msg.Text)
 	chatID := msg.Chat.ID
-	replyTo := msg.MessageID
-
-	// Handle /start command.
-	if text == "/start" || text == "/help" {
-		b.sendReply(chatID, replyTo, ""+
-			"*OpenTL* \\- Send a task, get a PR\\.\n\n"+
-			"*Usage:*\n"+
-			"`add rate limiting to users API --repo owner/repo`\n\n"+
-			"Or set `TELEGRAM_DEFAULT_REPO` and just send:\n"+
-			"`fix the broken login redirect`\n\n"+
-			"I'll create a session, run a coding agent, and send you the PR link with full terminal output\\.")
-		return
-	}
 
 	if text == "" {
 		return
 	}
 
-	// Extract --repo flag from text if present.
+	// Handle commands.
+	if strings.HasPrefix(text, "/") {
+		b.handleCommand(chatID, msg.MessageID, text)
+		return
+	}
+
+	// Regular message → send to active chat session (or start one).
+	b.handleChatMessage(chatID, msg.MessageID, text)
+}
+
+// handleCommand processes slash commands.
+func (b *Bot) handleCommand(chatID int64, replyTo int, text string) {
+	parts := strings.Fields(text)
+	cmd := strings.ToLower(parts[0])
+
+	switch cmd {
+	case "/start", "/help":
+		b.sendHelp(chatID, replyTo)
+
+	case "/new":
+		// /new [--repo owner/repo]
+		repo := b.defaultRepo
+		args := strings.Join(parts[1:], " ")
+		if idx := strings.Index(args, "--repo "); idx >= 0 {
+			repoParts := strings.Fields(args[idx+7:])
+			if len(repoParts) > 0 {
+				repo = repoParts[0]
+			}
+		} else if len(parts) > 1 && strings.Contains(parts[1], "/") {
+			// Allow /new owner/repo shorthand.
+			repo = parts[1]
+		}
+		b.startNewSession(chatID, replyTo, repo)
+
+	case "/pr":
+		b.handlePR(chatID, replyTo)
+
+	case "/diff":
+		b.handleDiff(chatID, replyTo)
+
+	case "/status":
+		b.handleStatus(chatID, replyTo)
+
+	case "/stop":
+		b.handleStop(chatID, replyTo)
+
+	case "/run":
+		// Legacy fire-and-forget mode.
+		prompt := strings.TrimSpace(strings.TrimPrefix(text, "/run"))
+		if prompt == "" {
+			b.sendReply(chatID, replyTo, "Usage: `/run fix the typo \\-\\-repo owner/repo`")
+			return
+		}
+		b.handleLegacyRun(chatID, replyTo, prompt)
+
+	default:
+		b.sendReply(chatID, replyTo, fmt.Sprintf("Unknown command `%s`\\. Try /help", escapeMarkdown(cmd)))
+	}
+}
+
+// --- Chat mode ---
+
+// handleChatMessage sends a message to the active chat session, or starts a new one.
+func (b *Bot) handleChatMessage(chatID int64, replyTo int, text string) {
+	b.chatMu.RLock()
+	state := b.chatSessions[chatID]
+	b.chatMu.RUnlock()
+
+	if state == nil {
+		// No active session — check if the message includes --repo.
+		repo := b.defaultRepo
+		prompt := text
+		if idx := strings.Index(text, "--repo "); idx >= 0 {
+			parts := strings.Fields(text[idx+7:])
+			if len(parts) > 0 {
+				repo = parts[0]
+				prompt = strings.TrimSpace(text[:idx])
+			}
+		}
+
+		if repo == "" {
+			b.sendReply(chatID, replyTo,
+				"No active session\\. Start one with:\n"+
+					"`/new \\-\\-repo owner/repo`\n\n"+
+					"Or send a message with `\\-\\-repo`:\n"+
+					"`fix the bug \\-\\-repo owner/repo`")
+			return
+		}
+
+		// Start a new session with this message as the first prompt.
+		b.startNewSessionWithMessage(chatID, replyTo, repo, prompt)
+		return
+	}
+
+	// Active session exists — send the message.
+	b.sendChatAction(chatID) // Show "typing" indicator.
+
+	msg, err := b.sessions.SendChatMessage(state.sessionID, text)
+	if err != nil {
+		b.sendReply(chatID, replyTo,
+			fmt.Sprintf("⚠️ %s", escapeMarkdown(err.Error())))
+		return
+	}
+
+	// Monitor the session for this message's output.
+	b.monitorUntilIdle(state.sessionID, chatID, replyTo, msg.ID)
+}
+
+// startNewSession creates a fresh chat session (without an initial message).
+func (b *Bot) startNewSession(chatID int64, replyTo int, repo string) {
+	if repo == "" {
+		b.sendReply(chatID, replyTo,
+			"Please specify a repo:\n`/new \\-\\-repo owner/repo`\n\nor set `TELEGRAM_DEFAULT_REPO`")
+		return
+	}
+
+	// Stop any existing session for this chat.
+	b.cleanupChat(chatID)
+
+	b.sendReply(chatID, replyTo,
+		fmt.Sprintf("⚙ Starting new session for `%s`\\.\\.\\.", escapeMarkdown(repo)))
+
+	sess, err := b.sessions.CreateChatSession(repo)
+	if err != nil {
+		b.sendReply(chatID, replyTo,
+			fmt.Sprintf("❌ Failed to create session: %s", escapeMarkdown(err.Error())))
+		return
+	}
+
+	b.chatMu.Lock()
+	b.chatSessions[chatID] = &chatState{
+		sessionID: sess.ID,
+		repo:      repo,
+	}
+	b.chatMu.Unlock()
+
+	// Monitor setup events until the session is idle.
+	b.monitorUntilIdle(sess.ID, chatID, replyTo, 0)
+}
+
+// startNewSessionWithMessage creates a session and immediately sends the first message.
+func (b *Bot) startNewSessionWithMessage(chatID int64, replyTo int, repo, prompt string) {
+	b.cleanupChat(chatID)
+
+	b.sendReply(chatID, replyTo,
+		fmt.Sprintf("⚙ Starting session for `%s`\\.\\.\\.", escapeMarkdown(repo)))
+	b.sendChatAction(chatID)
+
+	sess, err := b.sessions.CreateChatSession(repo)
+	if err != nil {
+		b.sendReply(chatID, replyTo,
+			fmt.Sprintf("❌ Failed to create session: %s", escapeMarkdown(err.Error())))
+		return
+	}
+
+	b.chatMu.Lock()
+	b.chatSessions[chatID] = &chatState{
+		sessionID: sess.ID,
+		repo:      repo,
+	}
+	b.chatMu.Unlock()
+
+	// Wait for session to become idle (setup complete), then send the message.
+	b.waitForIdle(sess.ID, chatID, replyTo)
+
+	// Now send the first message.
+	msg, err := b.sessions.SendChatMessage(sess.ID, prompt)
+	if err != nil {
+		b.sendReply(chatID, replyTo,
+			fmt.Sprintf("⚠️ %s", escapeMarkdown(err.Error())))
+		return
+	}
+
+	b.monitorUntilIdle(sess.ID, chatID, replyTo, msg.ID)
+}
+
+// --- Command handlers ---
+
+func (b *Bot) handlePR(chatID int64, replyTo int) {
+	state := b.getChatState(chatID)
+	if state == nil {
+		b.sendReply(chatID, replyTo, "No active session\\. Start one first with /new")
+		return
+	}
+
+	b.sendReply(chatID, replyTo, "⚙ Creating pull request\\.\\.\\.")
+	b.sendChatAction(chatID)
+
+	prURL, prNumber, err := b.sessions.CreatePRFromChat(state.sessionID)
+	if err != nil {
+		b.sendReply(chatID, replyTo,
+			fmt.Sprintf("❌ %s", escapeMarkdown(err.Error())))
+		return
+	}
+
+	b.sendReply(chatID, replyTo,
+		fmt.Sprintf("✅ *PR Ready\\!*\n\n[PR \\#%d](%s)\n\nSession `%s`",
+			prNumber,
+			escapeMarkdown(prURL),
+			state.sessionID))
+
+	// Session is complete — remove the mapping.
+	b.chatMu.Lock()
+	delete(b.chatSessions, chatID)
+	b.chatMu.Unlock()
+}
+
+func (b *Bot) handleDiff(chatID int64, replyTo int) {
+	state := b.getChatState(chatID)
+	if state == nil {
+		b.sendReply(chatID, replyTo, "No active session\\.")
+		return
+	}
+
+	sess, err := b.store.GetSession(state.sessionID)
+	if err != nil || sess.ContainerID == "" {
+		b.sendReply(chatID, replyTo, "Session has no active container\\.")
+		return
+	}
+
+	// Get diff via the store's events (latest approach) or we need sandbox access.
+	// For now, emit a status event and let the server handle it.
+	b.sendReply(chatID, replyTo, "⚙ Fetching diff\\.\\.\\.")
+
+	// Use the server's event-based approach: the diff is available via the API.
+	// We'll just tell the user to check the session.
+	events, _ := b.store.GetEvents(state.sessionID, 0)
+	var lastOutput string
+	for _, e := range events {
+		if e.Type == "output" {
+			lastOutput = e.Data
+		}
+	}
+	if lastOutput != "" && len(lastOutput) > 3500 {
+		lastOutput = lastOutput[:3500] + "\n... (truncated)"
+	}
+	if lastOutput == "" {
+		lastOutput = "(no changes detected yet)"
+	}
+
+	b.sendReply(chatID, replyTo,
+		fmt.Sprintf("```\n%s\n```", escapeMarkdown(lastOutput)))
+}
+
+func (b *Bot) handleStatus(chatID int64, replyTo int) {
+	state := b.getChatState(chatID)
+	if state == nil {
+		b.sendReply(chatID, replyTo, "No active session\\. Start one with /new")
+		return
+	}
+
+	sess, err := b.store.GetSession(state.sessionID)
+	if err != nil {
+		b.sendReply(chatID, replyTo, "❌ Could not fetch session info\\.")
+		return
+	}
+
+	msgs, _ := b.store.GetMessages(state.sessionID)
+	userMsgCount := 0
+	for _, m := range msgs {
+		if m.Role == "user" {
+			userMsgCount++
+		}
+	}
+
+	b.sendReply(chatID, replyTo, fmt.Sprintf(
+		"*Session* `%s`\n"+
+			"*Repo:* `%s`\n"+
+			"*Status:* `%s`\n"+
+			"*Branch:* `%s`\n"+
+			"*Messages:* %d",
+		sess.ID,
+		escapeMarkdown(sess.Repo),
+		escapeMarkdown(string(sess.Status)),
+		escapeMarkdown(sess.Branch),
+		userMsgCount,
+	))
+}
+
+func (b *Bot) handleStop(chatID int64, replyTo int) {
+	state := b.getChatState(chatID)
+	if state == nil {
+		b.sendReply(chatID, replyTo, "No active session\\.")
+		return
+	}
+
+	b.cleanupChat(chatID)
+	b.sendReply(chatID, replyTo, "✅ Session stopped\\.")
+}
+
+// handleLegacyRun runs a one-shot task (fire-and-forget mode).
+func (b *Bot) handleLegacyRun(chatID int64, replyTo int, text string) {
 	prompt := text
 	repo := b.defaultRepo
+
 	if idx := strings.Index(prompt, "--repo "); idx >= 0 {
 		parts := strings.Fields(prompt[idx+7:])
 		if len(parts) > 0 {
@@ -108,37 +408,123 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 
 	if repo == "" {
 		b.sendReply(chatID, replyTo,
-			"Please specify a repo:\n`add rate limiting --repo owner/repo`")
+			"Please specify a repo: `/run fix typo \\-\\-repo owner/repo`")
 		return
 	}
 
-	if prompt == "" {
-		b.sendReply(chatID, replyTo, "Please provide a task description\\.")
-		return
-	}
-
-	// Acknowledge the task.
 	b.sendReply(chatID, replyTo,
-		fmt.Sprintf("Starting task in `%s`\\.\\.\\.\n> %s",
+		fmt.Sprintf("⚙ Starting task in `%s`\\.\\.\\.\n> %s",
 			escapeMarkdown(repo), escapeMarkdown(prompt)))
 
-	// Create and start the session.
 	sess, err := b.sessions.CreateAndRunSession(repo, prompt)
 	if err != nil {
 		b.sendReply(chatID, replyTo,
-			fmt.Sprintf("Failed to start session: %s", escapeMarkdown(err.Error())))
+			fmt.Sprintf("❌ Failed: %s", escapeMarkdown(err.Error())))
 		return
 	}
 
 	b.sendReply(chatID, replyTo,
-		fmt.Sprintf("Session `%s` created\\. I'll update you as it progresses\\.", sess.ID))
+		fmt.Sprintf("Session `%s` created\\. I'll send the PR when it's done\\.", sess.ID))
 
-	// Monitor the session in the background.
-	go b.monitorSession(sess, chatID, replyTo)
+	go b.monitorTaskSession(sess, chatID, replyTo)
 }
 
-// monitorSession subscribes to session events and sends key updates.
-func (b *Bot) monitorSession(sess *session.Session, chatID int64, replyTo int) {
+// --- Event monitoring ---
+
+// monitorUntilIdle subscribes to events and relays them until the session
+// reaches "idle" or "Ready" status, or an error/done event.
+func (b *Bot) monitorUntilIdle(sessionID string, chatID int64, replyTo int, afterMsgID int64) {
+	ch := b.bus.Subscribe(sessionID)
+	defer b.bus.Unsubscribe(sessionID, ch)
+
+	// Buffer output to avoid flooding Telegram (batch every 2s).
+	var outputBuf strings.Builder
+	flushTicker := time.NewTicker(2 * time.Second)
+	defer flushTicker.Stop()
+
+	flush := func() {
+		if outputBuf.Len() == 0 {
+			return
+		}
+		text := outputBuf.String()
+		outputBuf.Reset()
+		// Truncate if too long for Telegram.
+		if len(text) > 3800 {
+			text = text[len(text)-3800:]
+			text = "\\.\\.\\.\n" + text
+		}
+		b.sendReply(chatID, replyTo, fmt.Sprintf("```\n%s\n```", escapeMarkdown(text)))
+	}
+
+	for {
+		select {
+		case event, ok := <-ch:
+			if !ok {
+				flush()
+				return
+			}
+
+			switch event.Type {
+			case "status":
+				flush() // Flush any buffered output first.
+				if event.Data == "Ready" || strings.HasPrefix(event.Data, "Ready") {
+					b.sendReply(chatID, replyTo,
+						fmt.Sprintf("✅ %s", escapeMarkdown(event.Data)))
+					return
+				}
+				b.sendReply(chatID, replyTo,
+					fmt.Sprintf("⚙ %s", escapeMarkdown(event.Data)))
+				b.sendChatAction(chatID) // Keep "typing" indicator alive.
+
+			case "output":
+				outputBuf.WriteString(event.Data)
+				outputBuf.WriteString("\n")
+
+			case "error":
+				flush()
+				b.sendReply(chatID, replyTo,
+					fmt.Sprintf("❌ %s", escapeMarkdown(event.Data)))
+				return
+
+			case "done":
+				flush()
+				b.sendReply(chatID, replyTo,
+					fmt.Sprintf("✅ Done: %s", escapeMarkdown(event.Data)))
+				return
+			}
+
+		case <-flushTicker.C:
+			flush()
+		}
+	}
+}
+
+// waitForIdle blocks until the session reaches idle status.
+func (b *Bot) waitForIdle(sessionID string, chatID int64, replyTo int) {
+	ch := b.bus.Subscribe(sessionID)
+	defer b.bus.Unsubscribe(sessionID, ch)
+
+	for event := range ch {
+		switch event.Type {
+		case "status":
+			if event.Data == "Ready" || strings.HasPrefix(event.Data, "Ready") {
+				b.sendReply(chatID, replyTo,
+					fmt.Sprintf("✅ %s", escapeMarkdown(event.Data)))
+				return
+			}
+			b.sendReply(chatID, replyTo,
+				fmt.Sprintf("⚙ %s", escapeMarkdown(event.Data)))
+			b.sendChatAction(chatID)
+		case "error":
+			b.sendReply(chatID, replyTo,
+				fmt.Sprintf("❌ %s", escapeMarkdown(event.Data)))
+			return
+		}
+	}
+}
+
+// monitorTaskSession monitors a legacy fire-and-forget session.
+func (b *Bot) monitorTaskSession(sess *session.Session, chatID int64, replyTo int) {
 	ch := b.bus.Subscribe(sess.ID)
 	defer b.bus.Unsubscribe(sess.ID, ch)
 
@@ -153,71 +539,51 @@ func (b *Bot) monitorSession(sess *session.Session, chatID int64, replyTo int) {
 				fmt.Sprintf("❌ *Error:* %s", escapeMarkdown(event.Data)))
 
 		case "done":
-			// Upload the full terminal log.
-			b.uploadSessionLog(chatID, replyTo, sess.ID)
-
-			// Refresh session to get PR info.
 			updated, err := b.store.GetSession(sess.ID)
 			if err != nil {
 				b.sendReply(chatID, replyTo,
-					fmt.Sprintf("✅ Session complete\\.\n%s", escapeMarkdown(event.Data)))
+					fmt.Sprintf("✅ Done\\.\n%s", escapeMarkdown(event.Data)))
 				return
 			}
-
 			b.sendPRMessage(chatID, replyTo, updated)
 			return
 		}
 	}
 }
 
-// uploadSessionLog fetches all events, formats them, and uploads as a document.
-func (b *Bot) uploadSessionLog(chatID int64, replyTo int, sessionID string) {
-	events, err := b.store.GetEvents(sessionID, 0)
-	if err != nil {
-		log.Printf("Telegram: failed to get events for session %s: %v", sessionID, err)
-		return
-	}
+// --- Helpers ---
 
-	if len(events) == 0 {
-		return
-	}
-
-	// Format as a readable log.
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("OpenTL Session Log: %s\n", sessionID))
-	sb.WriteString(fmt.Sprintf("Generated: %s\n", time.Now().UTC().Format(time.RFC3339)))
-	sb.WriteString(strings.Repeat("=", 60))
-	sb.WriteString("\n\n")
-
-	for _, e := range events {
-		ts := e.CreatedAt.Format("15:04:05")
-		tag := strings.ToUpper(e.Type)
-		sb.WriteString(fmt.Sprintf("[%s] [%s] %s\n", ts, tag, e.Data))
-	}
-
-	content := sb.String()
-	filename := fmt.Sprintf("opentl-session-%s.log", sessionID)
-
-	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
-		Name:  filename,
-		Bytes: []byte(content),
-	})
-	doc.ReplyToMessageID = replyTo
-	doc.Caption = fmt.Sprintf("Terminal output for session %s", sessionID)
-
-	if _, err := b.api.Send(doc); err != nil {
-		log.Printf("Telegram: failed to upload log file: %v", err)
-		// Fall back to a truncated text message.
-		truncated := content
-		if len(truncated) > 3500 {
-			truncated = "...(truncated)...\n" + truncated[len(truncated)-3500:]
-		}
-		b.sendReply(chatID, replyTo,
-			fmt.Sprintf("*Terminal Output \\(truncated\\):*\n```\n%s\n```", escapeMarkdown(truncated)))
-	}
+func (b *Bot) getChatState(chatID int64) *chatState {
+	b.chatMu.RLock()
+	defer b.chatMu.RUnlock()
+	return b.chatSessions[chatID]
 }
 
-// sendPRMessage sends a formatted message with the PR link.
+// cleanupChat removes the chat-to-session mapping for a Telegram chat.
+func (b *Bot) cleanupChat(chatID int64) {
+	b.chatMu.Lock()
+	delete(b.chatSessions, chatID)
+	b.chatMu.Unlock()
+}
+
+func (b *Bot) sendHelp(chatID int64, replyTo int) {
+	b.sendReply(chatID, replyTo, ""+
+		"*OpenTL* — Your AI coding agent\\.\n\n"+
+		"*Chat mode \\(multi\\-turn\\):*\n"+
+		"Just send a message\\! The first message starts a session\\.\n"+
+		"`fix the login bug \\-\\-repo owner/repo`\n"+
+		"Then send follow\\-ups:\n"+
+		"`also add tests for the fix`\n\n"+
+		"*Commands:*\n"+
+		"/new \\-\\- Start a fresh session\n"+
+		"/pr \\-\\- Create a PR from current changes\n"+
+		"/diff \\-\\- Show recent output\n"+
+		"/status \\-\\- Show session info\n"+
+		"/stop \\-\\- Stop the current session\n"+
+		"/run \\<task\\> \\-\\- One\\-shot mode \\(task → PR\\)\n"+
+		"/help \\-\\- Show this message")
+}
+
 func (b *Bot) sendPRMessage(chatID int64, replyTo int, sess *session.Session) {
 	if sess.PRUrl == "" {
 		b.sendReply(chatID, replyTo, "✅ Session complete \\(no PR created\\)\\.")
@@ -237,6 +603,12 @@ func (b *Bot) sendPRMessage(chatID int64, replyTo int, sess *session.Session) {
 	)
 
 	b.sendReply(chatID, replyTo, text)
+}
+
+// sendChatAction sends a "typing" indicator to the chat.
+func (b *Bot) sendChatAction(chatID int64) {
+	action := tgbotapi.NewChatAction(chatID, tgbotapi.ChatTyping)
+	b.api.Send(action)
 }
 
 // sendReply sends a MarkdownV2 message as a reply.

@@ -44,9 +44,10 @@ ENV PATH="/root/go/bin:${PATH}"
 # Create workspace directory.
 WORKDIR /workspace
 
-# Copy the entrypoint script.
+# Copy entrypoint scripts.
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY docker/setup.sh /setup.sh
+RUN chmod +x /entrypoint.sh /setup.sh
 
 # Environment variables (set by OpenTL server at runtime):
 #   OPENTL_SESSION_ID  - Session identifier

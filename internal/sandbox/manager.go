@@ -137,6 +137,154 @@ func (m *Manager) EnsureNetwork(ctx context.Context, name string) error {
 	return nil
 }
 
+// --- Persistent container support for chat sessions ---
+
+// StartPersistent creates a long-lived container that stays alive between
+// messages. The container runs "sleep infinity" instead of the entrypoint.
+// Use Exec() to run commands inside it.
+func (m *Manager) StartPersistent(ctx context.Context, opts StartOptions) (string, error) {
+	args := []string{
+		"run", "-d",
+		"--name", fmt.Sprintf("opentl-%s", opts.SessionID),
+		"--label", "opentl.session=" + opts.SessionID,
+	}
+
+	if opts.Network != "" {
+		args = append(args, "--network", opts.Network)
+	}
+
+	envVars := append(opts.Env,
+		"OPENTL_SESSION_ID="+opts.SessionID,
+		"OPENTL_REPO="+opts.Repo,
+		"OPENTL_BRANCH="+opts.Branch,
+	)
+	for _, e := range envVars {
+		args = append(args, "-e", e)
+	}
+
+	// Override entrypoint to keep the container alive.
+	args = append(args, "--entrypoint", "sleep")
+	args = append(args, opts.Image, "infinity")
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("starting persistent container: %w\noutput: %s", err, string(output))
+	}
+
+	return strings.TrimSpace(string(output)), nil
+}
+
+// Exec runs a command inside a running container and returns a streaming
+// line scanner. The caller must call Close() on the returned scanner.
+func (m *Manager) Exec(ctx context.Context, containerID string, command []string) (*LineScanner, error) {
+	args := append([]string{"exec", containerID}, command...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("attaching stdout: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("attaching stderr: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("starting exec: %w", err)
+	}
+
+	merged := io.MultiReader(stdout, stderr)
+	scanner := bufio.NewScanner(merged)
+	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
+
+	return &LineScanner{
+		scanner: scanner,
+		cmd:     cmd,
+	}, nil
+}
+
+// ExecCollect runs a command inside a container and returns all output as a string.
+func (m *Manager) ExecCollect(ctx context.Context, containerID string, command []string) (string, error) {
+	args := append([]string{"exec", containerID}, command...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("exec failed: %w\noutput: %s", err, string(output))
+	}
+	return string(output), nil
+}
+
+// CommitAndPush stages all changes, commits them, and pushes the branch.
+func (m *Manager) CommitAndPush(ctx context.Context, containerID, message, branch string) error {
+	// Stage all changes.
+	if _, err := m.ExecCollect(ctx, containerID, []string{
+		"git", "-C", "/workspace/repo", "add", "-A",
+	}); err != nil {
+		return fmt.Errorf("git add: %w", err)
+	}
+
+	// Check if there are changes to commit.
+	checkCmd := exec.CommandContext(ctx, "docker", "exec", containerID,
+		"git", "-C", "/workspace/repo", "diff", "--cached", "--quiet")
+	if checkCmd.Run() == nil {
+		return fmt.Errorf("no changes to commit")
+	}
+
+	// Truncate commit message.
+	if len(message) > 69 {
+		message = message[:69] + "..."
+	}
+	commitMsg := "opentl: " + message
+
+	if _, err := m.ExecCollect(ctx, containerID, []string{
+		"git", "-C", "/workspace/repo", "commit", "-m", commitMsg,
+	}); err != nil {
+		return fmt.Errorf("git commit: %w", err)
+	}
+
+	// Push (force to handle amended commits from multiple messages).
+	if _, err := m.ExecCollect(ctx, containerID, []string{
+		"git", "-C", "/workspace/repo", "push", "--force-with-lease", "origin", branch,
+	}); err != nil {
+		return fmt.Errorf("git push: %w", err)
+	}
+
+	return nil
+}
+
+// GetDiff returns the git diff from the container's working directory.
+func (m *Manager) GetDiff(ctx context.Context, containerID string) (string, error) {
+	return m.ExecCollect(ctx, containerID, []string{
+		"git", "-C", "/workspace/repo", "diff",
+	})
+}
+
+// GetDiffStaged returns the staged diff (changes that have been git added).
+func (m *Manager) GetDiffStaged(ctx context.Context, containerID string) (string, error) {
+	return m.ExecCollect(ctx, containerID, []string{
+		"git", "-C", "/workspace/repo", "diff", "--cached",
+	})
+}
+
+// GetDiffAll returns the full diff of all changes compared to the initial branch state.
+func (m *Manager) GetDiffAll(ctx context.Context, containerID, branch string) (string, error) {
+	// Show all changes from the branch point (committed + staged + unstaged).
+	return m.ExecCollect(ctx, containerID, []string{
+		"git", "-C", "/workspace/repo", "diff", "origin/HEAD..HEAD",
+	})
+}
+
+// IsRunning checks if a container is still running.
+func (m *Manager) IsRunning(ctx context.Context, containerID string) bool {
+	cmd := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Running}}", containerID)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(output)) == "true"
+}
+
 // LineScanner wraps a bufio.Scanner for reading container log lines.
 type LineScanner struct {
 	scanner *bufio.Scanner

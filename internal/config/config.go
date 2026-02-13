@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 )
 
 // Config holds all configuration for the OpenTL server.
@@ -49,6 +50,14 @@ type Config struct {
 	// MaxRevisions is the maximum number of review-revision rounds before
 	// proceeding to PR creation. 0 means no revisions (review only). Default: 1.
 	MaxRevisions int
+
+	// ChatIdleTimeout is how long a chat sandbox stays alive without messages
+	// before being automatically stopped. Default: 30 minutes.
+	ChatIdleTimeout time.Duration
+
+	// ChatMaxMessages is the maximum number of user messages per chat session.
+	// Default: 50.
+	ChatMaxMessages int
 }
 
 // Load creates a Config from environment variables with sensible defaults.
@@ -73,6 +82,8 @@ func Load() (*Config, error) {
 		TelegramBotToken:    os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramDefaultRepo: os.Getenv("TELEGRAM_DEFAULT_REPO"),
 		MaxRevisions:        envOrInt("OPENTL_MAX_REVISIONS", 1),
+		ChatIdleTimeout:     envOrDuration("OPENTL_CHAT_IDLE_TIMEOUT", 30*time.Minute),
+		ChatMaxMessages:     envOrInt("OPENTL_CHAT_MAX_MESSAGES", 50),
 	}
 
 	return cfg, nil
@@ -111,6 +122,15 @@ func (c *Config) SandboxEnv() []string {
 		env = append(env, "OPENAI_API_KEY="+c.OpenAIAPIKey)
 	}
 	return env
+}
+
+func envOrDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return fallback
 }
 
 func envOrInt(key string, fallback int) int {

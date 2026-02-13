@@ -18,6 +18,18 @@ const (
 	StatusRunning  Status = "running"
 	StatusComplete Status = "complete"
 	StatusError    Status = "error"
+	// StatusIdle means the chat sandbox is alive and waiting for the next message.
+	StatusIdle Status = "idle"
+)
+
+// Mode represents the session interaction mode.
+type Mode string
+
+const (
+	// ModeTask is the default fire-and-forget mode (one prompt → PR).
+	ModeTask Mode = "task"
+	// ModeChat is multi-turn interactive mode (persistent sandbox, multiple messages).
+	ModeChat Mode = "chat"
 )
 
 // Session represents a single OpenTL task execution.
@@ -25,6 +37,7 @@ type Session struct {
 	ID          string    `json:"id"`
 	Repo        string    `json:"repo"`
 	Prompt      string    `json:"prompt"`
+	Mode        Mode      `json:"mode"`
 	Status      Status    `json:"status"`
 	Branch      string    `json:"branch"`
 	PRUrl       string    `json:"pr_url,omitempty"`
@@ -33,6 +46,15 @@ type Session struct {
 	Error       string    `json:"error,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// Message represents a single message in a chat session.
+type Message struct {
+	ID        int64     `json:"id"`
+	SessionID string    `json:"session_id"`
+	Role      string    `json:"role"` // "user" or "assistant"
+	Content   string    `json:"content"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Event represents a single event in a session's lifecycle.
@@ -76,6 +98,7 @@ func migrate(db *sql.DB) error {
 			id           TEXT PRIMARY KEY,
 			repo         TEXT NOT NULL,
 			prompt       TEXT NOT NULL,
+			mode         TEXT NOT NULL DEFAULT 'task',
 			status       TEXT NOT NULL DEFAULT 'pending',
 			branch       TEXT NOT NULL DEFAULT '',
 			pr_url       TEXT NOT NULL DEFAULT '',
@@ -97,6 +120,18 @@ func migrate(db *sql.DB) error {
 
 		CREATE INDEX IF NOT EXISTS idx_events_session_id
 			ON session_events(session_id);
+
+		CREATE TABLE IF NOT EXISTS messages (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			role       TEXT NOT NULL,
+			content    TEXT NOT NULL,
+			created_at DATETIME NOT NULL DEFAULT (datetime('now')),
+			FOREIGN KEY (session_id) REFERENCES sessions(id)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_messages_session_id
+			ON messages(session_id);
 	`)
 	return err
 }
@@ -108,10 +143,13 @@ func (s *Store) Close() error {
 
 // CreateSession inserts a new session.
 func (s *Store) CreateSession(sess *Session) error {
+	if sess.Mode == "" {
+		sess.Mode = ModeTask
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO sessions (id, repo, prompt, status, branch, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		sess.ID, sess.Repo, sess.Prompt, sess.Status, sess.Branch,
+		`INSERT INTO sessions (id, repo, prompt, mode, status, branch, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		sess.ID, sess.Repo, sess.Prompt, sess.Mode, sess.Status, sess.Branch,
 		sess.CreatedAt, sess.UpdatedAt,
 	)
 	return err
@@ -120,7 +158,7 @@ func (s *Store) CreateSession(sess *Session) error {
 // GetSession retrieves a session by ID.
 func (s *Store) GetSession(id string) (*Session, error) {
 	row := s.db.QueryRow(
-		`SELECT id, repo, prompt, status, branch, pr_url, pr_number,
+		`SELECT id, repo, prompt, mode, status, branch, pr_url, pr_number,
 		        container_id, error, created_at, updated_at
 		 FROM sessions WHERE id = ?`, id,
 	)
@@ -130,7 +168,7 @@ func (s *Store) GetSession(id string) (*Session, error) {
 // ListSessions returns all sessions ordered by creation time (newest first).
 func (s *Store) ListSessions() ([]*Session, error) {
 	rows, err := s.db.Query(
-		`SELECT id, repo, prompt, status, branch, pr_url, pr_number,
+		`SELECT id, repo, prompt, mode, status, branch, pr_url, pr_number,
 		        container_id, error, created_at, updated_at
 		 FROM sessions ORDER BY created_at DESC`,
 	)
@@ -216,7 +254,7 @@ type scannable interface {
 func scanSession(row scannable) (*Session, error) {
 	sess := &Session{}
 	err := row.Scan(
-		&sess.ID, &sess.Repo, &sess.Prompt, &sess.Status,
+		&sess.ID, &sess.Repo, &sess.Prompt, &sess.Mode, &sess.Status,
 		&sess.Branch, &sess.PRUrl, &sess.PRNumber,
 		&sess.ContainerID, &sess.Error, &sess.CreatedAt, &sess.UpdatedAt,
 	)
@@ -229,7 +267,7 @@ func scanSession(row scannable) (*Session, error) {
 func scanSessionRows(rows *sql.Rows) (*Session, error) {
 	sess := &Session{}
 	err := rows.Scan(
-		&sess.ID, &sess.Repo, &sess.Prompt, &sess.Status,
+		&sess.ID, &sess.Repo, &sess.Prompt, &sess.Mode, &sess.Status,
 		&sess.Branch, &sess.PRUrl, &sess.PRNumber,
 		&sess.ContainerID, &sess.Error, &sess.CreatedAt, &sess.UpdatedAt,
 	)
@@ -237,6 +275,51 @@ func scanSessionRows(rows *sql.Rows) (*Session, error) {
 		return nil, err
 	}
 	return sess, nil
+}
+
+// --- Message persistence for chat sessions ---
+
+// AddMessage inserts a new message into a chat session.
+func (s *Store) AddMessage(msg *Message) error {
+	result, err := s.db.Exec(
+		`INSERT INTO messages (session_id, role, content, created_at)
+		 VALUES (?, ?, ?, ?)`,
+		msg.SessionID, msg.Role, msg.Content, msg.CreatedAt,
+	)
+	if err != nil {
+		return err
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return err
+	}
+	msg.ID = id
+	return nil
+}
+
+// GetMessages returns all messages for a session ordered by creation time.
+func (s *Store) GetMessages(sessionID string) ([]*Message, error) {
+	rows, err := s.db.Query(
+		`SELECT id, session_id, role, content, created_at
+		 FROM messages
+		 WHERE session_id = ?
+		 ORDER BY id ASC`,
+		sessionID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []*Message
+	for rows.Next() {
+		m := &Message{}
+		if err := rows.Scan(&m.ID, &m.SessionID, &m.Role, &m.Content, &m.CreatedAt); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, m)
+	}
+	return msgs, rows.Err()
 }
 
 // --- In-memory event bus for real-time streaming ---
