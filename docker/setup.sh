@@ -46,7 +46,11 @@ if [ -f "package-lock.json" ]; then
 elif [ -f "pnpm-lock.yaml" ]; then
     pnpm install --frozen-lockfile 2>&1 || pnpm install 2>&1 || true
 elif [ -f "yarn.lock" ]; then
-    npm install -g yarn 2>&1 && yarn install --frozen-lockfile 2>&1 || true
+    if command -v yarn >/dev/null 2>&1; then
+        yarn install --frozen-lockfile 2>&1 || true
+    else
+        npm install 2>&1 || true
+    fi
 elif [ -f "requirements.txt" ]; then
     pip install -r requirements.txt 2>&1 || true
 elif [ -f "go.mod" ]; then

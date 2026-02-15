@@ -17,5 +17,7 @@ FROM alpine:3.20
 RUN apk add --no-cache ca-certificates docker-cli
 
 COPY --from=builder /opentl /usr/local/bin/opentl
+RUN adduser -D -u 10001 opentl
+USER opentl
 
 ENTRYPOINT ["opentl", "serve"]

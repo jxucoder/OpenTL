@@ -59,6 +59,13 @@ COPY docker/entrypoint.sh /entrypoint.sh
 COPY docker/setup.sh /setup.sh
 RUN chmod +x /entrypoint.sh /setup.sh
 
+# Create and use a non-root runtime user.
+RUN useradd -m -u 10001 -s /bin/bash opentl \
+    && mkdir -p /workspace \
+    && chown -R opentl:opentl /workspace /home/opentl
+ENV HOME=/home/opentl
+USER opentl
+
 # Environment variables (set by OpenTL server at runtime):
 #   OPENTL_SESSION_ID  - Session identifier
 #   OPENTL_REPO        - Repository (owner/repo)
