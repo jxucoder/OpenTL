@@ -1,12 +1,15 @@
 # OpenTL Sandbox Base Image
 #
-# This image provides a full development environment for running
-# the OpenCode coding agent inside an isolated Docker container.
+# This image provides a full development environment with multiple
+# coding agents (Codex CLI, OpenCode) inside an isolated Docker container.
 #
 # Build:  docker build -f docker/base.Dockerfile -t opentl-sandbox .
 # Run:    (managed by OpenTL server, not intended for direct use)
 
 FROM ubuntu:24.04
+
+# Expose build-time architecture (amd64 or arm64).
+ARG TARGETARCH
 
 # Avoid interactive prompts during package installation.
 ENV DEBIAN_FRONTEND=noninteractive
@@ -18,6 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     build-essential \
     jq \
+    ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 22 (LTS).
@@ -33,13 +37,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Go (for OpenCode and Go-based projects).
-RUN curl -fsSL https://go.dev/dl/go1.23.4.linux-amd64.tar.gz | tar -C /usr/local -xzf -
+# Install Go (for Go-based projects and OpenCode).
+# Use TARGETARCH so this works on both amd64 and arm64 hosts.
+RUN curl -fsSL "https://go.dev/dl/go1.23.4.linux-${TARGETARCH}.tar.gz" | tar -C /usr/local -xzf -
 ENV PATH="/usr/local/go/bin:${PATH}"
 
-# Install OpenCode (the coding agent that runs inside the sandbox).
-RUN go install github.com/nicepkg/opencode@latest
-ENV PATH="/root/go/bin:${PATH}"
+# --- Coding Agents ---
+
+# 1. Codex CLI (OpenAI) — preferred when OPENAI_API_KEY is set.
+RUN npm install -g @openai/codex
+
+# 2. OpenCode (npm) — preferred when ANTHROPIC_API_KEY is set.
+#    The actively maintained version is the npm package, not the old Go module.
+RUN npm install -g opencode-ai@latest
 
 # Create workspace directory.
 WORKDIR /workspace

@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -22,11 +23,47 @@ type StartOptions struct {
 }
 
 // Manager handles Docker sandbox lifecycle.
-type Manager struct{}
+type Manager struct {
+	// dockerBin is the resolved path to the docker binary.
+	dockerBin string
+}
 
 // NewManager creates a new sandbox Manager.
+// It resolves the Docker binary path at startup, checking common install
+// locations on macOS when docker is not in PATH.
 func NewManager() *Manager {
-	return &Manager{}
+	return &Manager{
+		dockerBin: findDocker(),
+	}
+}
+
+// findDocker locates the docker binary, checking PATH first and then
+// well-known install locations (Docker Desktop on macOS, Homebrew, etc.).
+func findDocker() string {
+	// 1. Check PATH (works when user has docker configured normally).
+	if p, err := exec.LookPath("docker"); err == nil {
+		return p
+	}
+
+	// 2. Check common locations that may not be in PATH.
+	candidates := []string{
+		"/Applications/Docker.app/Contents/Resources/bin/docker", // Docker Desktop (macOS)
+		"/usr/local/bin/docker",                                  // Homebrew / manual install
+		"/opt/homebrew/bin/docker",                                // Homebrew on Apple Silicon
+	}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			return c
+		}
+	}
+
+	// Fallback: just use "docker" and let exec fail with a clear error.
+	return "docker"
+}
+
+// docker creates an exec.Cmd using the resolved docker binary path.
+func (m *Manager) docker(ctx context.Context, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, m.dockerBin, args...)
 }
 
 // Start creates and starts a new sandbox container. Returns the container ID.
@@ -56,7 +93,7 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (string, error) 
 	// Image
 	args = append(args, opts.Image)
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := m.docker(ctx, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("starting container: %w\noutput: %s", err, string(output))
@@ -68,7 +105,7 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (string, error) 
 
 // StreamLogs attaches to a container's stdout and returns a line-by-line reader.
 func (m *Manager) StreamLogs(ctx context.Context, containerID string) (*LineScanner, error) {
-	cmd := exec.CommandContext(ctx, "docker", "logs", "-f", containerID)
+	cmd := m.docker(ctx, "logs", "-f", containerID)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("attaching stdout: %w", err)
@@ -96,10 +133,10 @@ func (m *Manager) StreamLogs(ctx context.Context, containerID string) (*LineScan
 // Stop kills and removes a sandbox container.
 func (m *Manager) Stop(ctx context.Context, containerID string) error {
 	// Kill the container (ignore error if already stopped).
-	_ = exec.CommandContext(ctx, "docker", "kill", containerID).Run()
+	_ = m.docker(ctx, "kill", containerID).Run()
 
 	// Remove the container.
-	cmd := exec.CommandContext(ctx, "docker", "rm", "-f", containerID)
+	cmd := m.docker(ctx, "rm", "-f", containerID)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("removing container: %w\noutput: %s", err, string(output))
 	}
@@ -108,7 +145,7 @@ func (m *Manager) Stop(ctx context.Context, containerID string) error {
 
 // Wait blocks until the container exits and returns the exit code.
 func (m *Manager) Wait(ctx context.Context, containerID string) (int, error) {
-	cmd := exec.CommandContext(ctx, "docker", "wait", containerID)
+	cmd := m.docker(ctx, "wait", containerID)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return -1, fmt.Errorf("waiting for container: %w", err)
@@ -125,12 +162,12 @@ func (m *Manager) Wait(ctx context.Context, containerID string) (int, error) {
 // EnsureNetwork creates the Docker network if it doesn't exist.
 func (m *Manager) EnsureNetwork(ctx context.Context, name string) error {
 	// Check if network exists.
-	check := exec.CommandContext(ctx, "docker", "network", "inspect", name)
+	check := m.docker(ctx, "network", "inspect", name)
 	if check.Run() == nil {
 		return nil // Already exists.
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", "network", "create", name)
+	cmd := m.docker(ctx, "network", "create", name)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("creating network %q: %w\noutput: %s", name, err, string(output))
 	}
@@ -166,7 +203,7 @@ func (m *Manager) StartPersistent(ctx context.Context, opts StartOptions) (strin
 	args = append(args, "--entrypoint", "sleep")
 	args = append(args, opts.Image, "infinity")
 
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := m.docker(ctx, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("starting persistent container: %w\noutput: %s", err, string(output))
@@ -179,7 +216,7 @@ func (m *Manager) StartPersistent(ctx context.Context, opts StartOptions) (strin
 // line scanner. The caller must call Close() on the returned scanner.
 func (m *Manager) Exec(ctx context.Context, containerID string, command []string) (*LineScanner, error) {
 	args := append([]string{"exec", containerID}, command...)
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := m.docker(ctx, args...)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -207,7 +244,7 @@ func (m *Manager) Exec(ctx context.Context, containerID string, command []string
 // ExecCollect runs a command inside a container and returns all output as a string.
 func (m *Manager) ExecCollect(ctx context.Context, containerID string, command []string) (string, error) {
 	args := append([]string{"exec", containerID}, command...)
-	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd := m.docker(ctx, args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("exec failed: %w\noutput: %s", err, string(output))
@@ -225,7 +262,7 @@ func (m *Manager) CommitAndPush(ctx context.Context, containerID, message, branc
 	}
 
 	// Check if there are changes to commit.
-	checkCmd := exec.CommandContext(ctx, "docker", "exec", containerID,
+	checkCmd := m.docker(ctx, "exec", containerID,
 		"git", "-C", "/workspace/repo", "diff", "--cached", "--quiet")
 	if checkCmd.Run() == nil {
 		return fmt.Errorf("no changes to commit")
@@ -277,7 +314,7 @@ func (m *Manager) GetDiffAll(ctx context.Context, containerID, branch string) (s
 
 // IsRunning checks if a container is still running.
 func (m *Manager) IsRunning(ctx context.Context, containerID string) bool {
-	cmd := exec.CommandContext(ctx, "docker", "inspect", "-f", "{{.State.Running}}", containerID)
+	cmd := m.docker(ctx, "inspect", "-f", "{{.State.Running}}", containerID)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return false

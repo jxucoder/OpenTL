@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -960,13 +959,13 @@ func (s *Server) runSandboxRound(ctx context.Context, sess *session.Session, pro
 
 // getDiffFromContainer runs `git diff` inside the container to get the changes.
 func (s *Server) getDiffFromContainer(ctx context.Context, containerID string) string {
-	execArgs := []string{"exec", containerID, "git", "-C", "/workspace/repo", "diff", "HEAD~1"}
-	cmd := exec.CommandContext(ctx, "docker", execArgs...)
-	output, err := cmd.CombinedOutput()
+	output, err := s.sandbox.ExecCollect(ctx, containerID, []string{
+		"git", "-C", "/workspace/repo", "diff", "HEAD~1",
+	})
 	if err != nil {
 		return ""
 	}
-	return string(output)
+	return output
 }
 
 func (s *Server) failSession(sess *session.Session, errMsg string) {

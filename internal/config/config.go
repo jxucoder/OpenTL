@@ -2,10 +2,12 @@
 package config
 
 import (
+	"bufio"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -60,8 +62,13 @@ type Config struct {
 	ChatMaxMessages int
 }
 
-// Load creates a Config from environment variables with sensible defaults.
+// Load creates a Config from the config file and environment variables.
+// Values are resolved in order: environment variable > config file > default.
 func Load() (*Config, error) {
+	// Load config file (~/.opentl/config.env) into the environment.
+	// Existing env vars take precedence (loadConfigFile only sets unset vars).
+	loadConfigFile()
+
 	dataDir := envOr("OPENTL_DATA_DIR", defaultDataDir())
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return nil, fmt.Errorf("creating data directory: %w", err)
@@ -87,6 +94,34 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// loadConfigFile reads ~/.opentl/config.env and sets any values that are not
+// already present in the environment. This ensures env vars always win.
+func loadConfigFile() {
+	path := filepath.Join(defaultDataDir(), "config.env")
+	f, err := os.Open(path)
+	if err != nil {
+		return // file doesn't exist or can't be read — that's fine
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key, value := parts[0], parts[1]
+		// Only set if not already in the environment.
+		if os.Getenv(key) == "" {
+			os.Setenv(key, value)
+		}
+	}
 }
 
 // Validate checks that required configuration is present.

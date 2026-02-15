@@ -22,6 +22,7 @@ var rootCmd = &cobra.Command{
 	Long: `OpenTL is an open source background coding agent for engineering teams.
 Send a task, get a PR.
 
+  opentl config setup                           Set up tokens (first time)
   opentl serve                                  Start the server
   opentl run "fix the bug" --repo owner/repo    Run a task
   opentl list                                   List sessions

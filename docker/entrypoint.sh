@@ -3,7 +3,7 @@
 #
 # This script runs inside the Docker sandbox container. It:
 #   1. Clones the repository
-#   2. Runs the OpenCode coding agent
+#   2. Runs a coding agent (OpenCode or Codex CLI)
 #   3. Commits and pushes changes
 #   4. Signals completion back to the server
 #
@@ -59,21 +59,49 @@ fi
 
 emit_status "Dependencies installed"
 
-# --- Run OpenCode agent ---
-emit_status "Running coding agent..."
+# --- Select and run coding agent ---
+# Agent selection priority:
+#   1. ANTHROPIC_API_KEY set → OpenCode with Claude Opus 4.6
+#   2. OPENAI_API_KEY set   → Codex CLI
+#   3. Neither              → error
 
-# Run OpenCode in non-interactive mode.
-# The agent reads the prompt and works on the codebase, then exits.
-if command -v opencode &> /dev/null; then
-    opencode -p "${OPENTL_PROMPT}" 2>&1 || {
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    # --- OpenCode + Claude Opus 4.6 ---
+    emit_status "Configuring OpenCode with Claude Opus 4.6..."
+
+    # New OpenCode (npm: opencode-ai) uses opencode.json with "model": "provider/model" format.
+    cat > /workspace/repo/opencode.json <<CFGEOF
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-opus-4-6"
+}
+CFGEOF
+
+    emit_status "Running OpenCode (Claude Opus 4.6)..."
+    opencode run -m "anthropic/claude-opus-4-6" "${OPENTL_PROMPT}" 2>&1 || {
         EXIT_CODE=$?
         if [ $EXIT_CODE -ne 0 ]; then
             emit_error "OpenCode agent exited with code ${EXIT_CODE}"
             exit $EXIT_CODE
         fi
     }
+
+elif [ -n "${OPENAI_API_KEY:-}" ]; then
+    # --- Codex CLI ---
+    emit_status "Running Codex CLI..."
+    codex exec \
+        --full-auto \
+        --ephemeral \
+        "${OPENTL_PROMPT}" 2>&1 || {
+        EXIT_CODE=$?
+        if [ $EXIT_CODE -ne 0 ]; then
+            emit_error "Codex agent exited with code ${EXIT_CODE}"
+            exit $EXIT_CODE
+        fi
+    }
+
 else
-    emit_error "OpenCode not found in PATH"
+    emit_error "No LLM API key set. Set ANTHROPIC_API_KEY or OPENAI_API_KEY."
     exit 1
 fi
 

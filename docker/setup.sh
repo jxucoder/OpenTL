@@ -54,4 +54,21 @@ elif [ -f "go.mod" ]; then
 fi
 
 emit_status "Dependencies installed"
+
+# --- Configure coding agent ---
+emit_status "Configuring coding agent..."
+
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    # OpenCode + Claude Opus 4.6 config.
+    cat > /workspace/repo/opencode.json <<CFGEOF
+{
+  "\$schema": "https://opencode.ai/config.json",
+  "model": "anthropic/claude-opus-4-6"
+}
+CFGEOF
+    emit_status "Agent: OpenCode (Claude Opus 4.6)"
+elif [ -n "${OPENAI_API_KEY:-}" ]; then
+    emit_status "Agent: Codex CLI"
+fi
+
 emit_status "Ready"
