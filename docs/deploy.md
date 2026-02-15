@@ -1,4 +1,4 @@
-# Deploy OpenTL
+# Deploy TeleCoder
 
 Get a VPS, run one script, message your bot from your phone.
 
@@ -22,15 +22,15 @@ When creating the server, choose **Ubuntu 24.04**. Add your SSH key.
 ssh root@YOUR_SERVER_IP
 
 git clone https://github.com/jxucoder/TeleCoder.git
-cd opentl
+cd TeleCoder
 ./deploy.sh
 ```
 
 That's it. The script handles everything:
 - Waits for Ubuntu's auto-updates to finish (common on fresh servers)
 - Installs Docker and Go
-- Builds the OpenTL binary
-- Runs interactive token setup (`opentl config setup`)
+- Builds the TeleCoder binary
+- Runs interactive token setup (`telecoder config setup`)
 - Builds the sandbox Docker image
 - Starts the server
 
@@ -38,17 +38,17 @@ That's it. The script handles everything:
 
 **From the server:**
 ```bash
-./bin/opentl run "add rate limiting" --repo your-org/your-repo
+./bin/telecoder run "add rate limiting" --repo your-org/your-repo
 ```
 
 **From your laptop:**
 ```bash
-opentl --server http://YOUR_SERVER_IP:7080 run "add rate limiting" --repo your-org/your-repo
+telecoder --server http://YOUR_SERVER_IP:7080 run "add rate limiting" --repo your-org/your-repo
 ```
 
 **From Telegram:** message your bot directly (if configured during setup).
 
-**From Slack:** `@OpenTL add rate limiting --repo your-org/your-repo`
+**From Slack:** `@TeleCoder add rate limiting --repo your-org/your-repo`
 
 ## What You Need Before Deploying
 
@@ -104,7 +104,7 @@ For personal use (one task at a time from Telegram), a 2GB server is fine.
 - The server listens on port 7080 (HTTP API). Firewall it if you don't need remote web access.
 - The Telegram bot uses **outbound** long-polling -- no inbound ports needed.
 - The Slack bot uses **outbound** Socket Mode -- no inbound ports needed.
-- Your tokens are stored in `~/.opentl/config.env` with `0600` permissions.
+- Your tokens are stored in `~/.telecoder/config.env` with `0600` permissions.
 - The `.env` file is already in `.gitignore`.
 
 ### Firewall (optional, if you only use Telegram/Slack)

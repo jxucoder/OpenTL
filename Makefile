@@ -1,14 +1,14 @@
-# OpenTL Makefile
+# TeleCoder Makefile
 
 .PHONY: build install clean test lint sandbox-image server-image docker-up docker-down
 
-# Build the opentl binary.
+# Build the telecoder binary.
 build:
-	go build -o bin/opentl ./cmd/opentl
+	go build -o bin/telecoder ./cmd/telecoder
 
-# Install the opentl binary to $GOPATH/bin.
+# Install the telecoder binary to $GOPATH/bin.
 install:
-	go install ./cmd/opentl
+	go install ./cmd/telecoder
 
 # Run tests.
 test:
@@ -20,11 +20,11 @@ lint:
 
 # Build the sandbox Docker image.
 sandbox-image:
-	docker build -f docker/base.Dockerfile -t opentl-sandbox .
+	docker build -f docker/base.Dockerfile -t telecoder-sandbox .
 
 # Build the server Docker image.
 server-image:
-	docker build -f docker/server.Dockerfile -t opentl-server .
+	docker build -f docker/server.Dockerfile -t telecoder-server .
 
 # Start everything with Docker Compose.
 docker-up: sandbox-image

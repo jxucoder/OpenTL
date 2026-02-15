@@ -1,10 +1,10 @@
-# OpenTL Sandbox Base Image
+# TeleCoder Sandbox Base Image
 #
 # This image provides a full development environment with multiple
 # coding agents (Codex CLI, OpenCode) inside an isolated Docker container.
 #
-# Build:  docker build -f docker/base.Dockerfile -t opentl-sandbox .
-# Run:    (managed by OpenTL server, not intended for direct use)
+# Build:  docker build -f docker/base.Dockerfile -t telecoder-sandbox .
+# Run:    (managed by TeleCoder server, not intended for direct use)
 
 FROM ubuntu:24.04
 
@@ -60,17 +60,17 @@ COPY docker/setup.sh /setup.sh
 RUN chmod +x /entrypoint.sh /setup.sh
 
 # Create and use a non-root runtime user.
-RUN useradd -m -u 10001 -s /bin/bash opentl \
+RUN useradd -m -u 10001 -s /bin/bash telecoder \
     && mkdir -p /workspace \
-    && chown -R opentl:opentl /workspace /home/opentl
-ENV HOME=/home/opentl
-USER opentl
+    && chown -R telecoder:telecoder /workspace /home/telecoder
+ENV HOME=/home/telecoder
+USER telecoder
 
-# Environment variables (set by OpenTL server at runtime):
-#   OPENTL_SESSION_ID  - Session identifier
-#   OPENTL_REPO        - Repository (owner/repo)
-#   OPENTL_PROMPT      - Task prompt
-#   OPENTL_BRANCH      - Git branch name
+# Environment variables (set by TeleCoder server at runtime):
+#   TELECODER_SESSION_ID  - Session identifier
+#   TELECODER_REPO        - Repository (owner/repo)
+#   TELECODER_PROMPT      - Task prompt
+#   TELECODER_BRANCH      - Git branch name
 #   GITHUB_TOKEN       - GitHub access token
 #   ANTHROPIC_API_KEY  - Anthropic API key (optional)
 #   OPENAI_API_KEY     - OpenAI API key (optional)

@@ -1,5 +1,5 @@
 #!/bin/bash
-# OpenTL Chat Sandbox Setup
+# TeleCoder Chat Sandbox Setup
 #
 # This script is run via `docker exec` inside a persistent chat container.
 # It performs the one-time setup: cloning the repo, installing deps, and
@@ -7,34 +7,34 @@
 # coding agent or commit/push — those are handled per-message by the server.
 #
 # Required environment variables (set by the server at container start):
-#   OPENTL_REPO     - "owner/repo"
-#   OPENTL_BRANCH   - git branch name
+#   TELECODER_REPO     - "owner/repo"
+#   TELECODER_BRANCH   - git branch name
 #   GITHUB_TOKEN    - GitHub access token
 
 set -euo pipefail
 
 # --- Helpers ---
-emit_status() { echo "###OPENTL_STATUS### $1"; }
-emit_error()  { echo "###OPENTL_ERROR### $1"; }
+emit_status() { echo "###TELECODER_STATUS### $1"; }
+emit_error()  { echo "###TELECODER_ERROR### $1"; }
 
 # --- Validate required environment ---
-: "${OPENTL_REPO:?OPENTL_REPO is required}"
-: "${OPENTL_BRANCH:?OPENTL_BRANCH is required}"
+: "${TELECODER_REPO:?TELECODER_REPO is required}"
+: "${TELECODER_BRANCH:?TELECODER_BRANCH is required}"
 : "${GITHUB_TOKEN:?GITHUB_TOKEN is required}"
 
 # --- Clone repository ---
-emit_status "Cloning ${OPENTL_REPO}..."
+emit_status "Cloning ${TELECODER_REPO}..."
 
-CLONE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${OPENTL_REPO}.git"
+CLONE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${TELECODER_REPO}.git"
 git clone --depth=50 "${CLONE_URL}" /workspace/repo 2>&1
 cd /workspace/repo
 
 # Configure git identity.
-git config user.name "OpenTL"
-git config user.email "opentl@users.noreply.github.com"
+git config user.name "TeleCoder"
+git config user.email "telecoder@users.noreply.github.com"
 
 # Create the working branch.
-git checkout -b "${OPENTL_BRANCH}"
+git checkout -b "${TELECODER_BRANCH}"
 
 emit_status "Repository cloned successfully"
 

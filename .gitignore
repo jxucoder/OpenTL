@@ -14,7 +14,7 @@ vendor/
 *.db
 *.db-journal
 *.db-wal
-.opentl/
+.telecoder/
 
 # Environment
 .env

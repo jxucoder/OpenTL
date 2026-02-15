@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# OpenTL Deploy Script
+# TeleCoder Deploy Script
 #
 # One-command deployment for any fresh Ubuntu server (22.04+):
 #
 #   git clone https://github.com/jxucoder/TeleCoder.git
-#   cd opentl
+#   cd TeleCoder
 #   ./deploy.sh
 #
 # The script will:
 #   1. Wait for apt locks to clear (fresh server auto-updates)
 #   2. Install Docker and Go if needed
-#   3. Build the opentl CLI
+#   3. Build the telecoder CLI
 #   4. Run interactive token setup (or read from existing config)
 #   5. Build the sandbox Docker image
 #   6. Start the server via Docker Compose
@@ -43,7 +43,7 @@ GO_VERSION="1.25.7"
 
 echo ""
 echo "  ╔═══════════════════════════════════╗"
-echo "  ║   OpenTL Deploy                   ║"
+echo "  ║   TeleCoder Deploy                   ║"
 echo "  ║   Send a task, get a PR.          ║"
 echo "  ╚═══════════════════════════════════╝"
 echo ""
@@ -98,7 +98,7 @@ fi
 
 # --- 3. Install Go and build ---
 
-step "Step 3/6 — Building OpenTL"
+step "Step 3/6 — Building TeleCoder"
 
 if ! command -v go &>/dev/null; then
     ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
@@ -127,7 +127,7 @@ if ! command -v make &>/dev/null; then
     apt-get update -qq && apt-get install -y -qq make >/dev/null 2>&1
 fi
 
-info "Building opentl binary..."
+info "Building telecoder binary..."
 make build
 info "Build complete"
 
@@ -137,49 +137,49 @@ step "Step 4/6 — Token Setup"
 
 if [ "$INTERACTIVE" = true ]; then
     # Check if tokens are already configured.
-    if ./bin/opentl config show 2>/dev/null | grep -q "GITHUB_TOKEN.*not set"; then
+    if ./bin/telecoder config show 2>/dev/null | grep -q "GITHUB_TOKEN.*not set"; then
         info "Running interactive setup..."
-        ./bin/opentl config setup
+        ./bin/telecoder config setup
     else
         info "Tokens already configured"
-        ./bin/opentl config show
+        ./bin/telecoder config show
         echo ""
         read -p "  Re-run setup? [y/N] " -r
         if [[ $REPLY =~ ^[Yy]$ ]]; then
-            ./bin/opentl config setup
+            ./bin/telecoder config setup
         fi
     fi
 else
     # Non-interactive: tokens must come from environment or existing config.
     # Write env vars to config file if they're set.
     if [ -n "${GITHUB_TOKEN:-}" ]; then
-        ./bin/opentl config set GITHUB_TOKEN "$GITHUB_TOKEN"
+        ./bin/telecoder config set GITHUB_TOKEN "$GITHUB_TOKEN"
     fi
     if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-        ./bin/opentl config set ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
+        ./bin/telecoder config set ANTHROPIC_API_KEY "$ANTHROPIC_API_KEY"
     fi
     if [ -n "${OPENAI_API_KEY:-}" ]; then
-        ./bin/opentl config set OPENAI_API_KEY "$OPENAI_API_KEY"
+        ./bin/telecoder config set OPENAI_API_KEY "$OPENAI_API_KEY"
     fi
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
-        ./bin/opentl config set TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
+        ./bin/telecoder config set TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
     fi
     if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
-        ./bin/opentl config set SLACK_BOT_TOKEN "$SLACK_BOT_TOKEN"
+        ./bin/telecoder config set SLACK_BOT_TOKEN "$SLACK_BOT_TOKEN"
     fi
     if [ -n "${SLACK_APP_TOKEN:-}" ]; then
-        ./bin/opentl config set SLACK_APP_TOKEN "$SLACK_APP_TOKEN"
+        ./bin/telecoder config set SLACK_APP_TOKEN "$SLACK_APP_TOKEN"
     fi
     info "Tokens configured from environment"
 fi
 
 # Validate that minimum tokens are present.
-if ./bin/opentl config show 2>/dev/null | grep -q "GITHUB_TOKEN.*not set"; then
-    error "GITHUB_TOKEN is required. Run: ./bin/opentl config setup"
+if ./bin/telecoder config show 2>/dev/null | grep -q "GITHUB_TOKEN.*not set"; then
+    error "GITHUB_TOKEN is required. Run: ./bin/telecoder config setup"
 fi
 
-# Generate .env for Docker Compose (reads from ~/.opentl/config.env).
-CONFIG_FILE="$HOME/.opentl/config.env"
+# Generate .env for Docker Compose (reads from ~/.telecoder/config.env).
+CONFIG_FILE="$HOME/.telecoder/config.env"
 if [ -f "$CONFIG_FILE" ]; then
     cp "$CONFIG_FILE" .env
     info "Generated .env from config"
@@ -214,15 +214,15 @@ SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 
 if curl -sf http://localhost:7080/api/sessions >/dev/null 2>&1; then
     echo ""
-    echo -e "  ${GREEN}${BOLD}OpenTL is running!${NC}"
+    echo -e "  ${GREEN}${BOLD}TeleCoder is running!${NC}"
     echo ""
     echo "  Server:   http://${SERVER_IP}:7080"
     echo ""
     echo "  Run a task from this server:"
-    echo "    ./bin/opentl run \"your task\" --repo owner/repo"
+    echo "    ./bin/telecoder run \"your task\" --repo owner/repo"
     echo ""
     echo "  Run a task from your laptop:"
-    echo "    opentl --server http://${SERVER_IP}:7080 run \"your task\" --repo owner/repo"
+    echo "    telecoder --server http://${SERVER_IP}:7080 run \"your task\" --repo owner/repo"
     echo ""
 
     # Check for bot integrations.
@@ -232,7 +232,7 @@ if curl -sf http://localhost:7080/api/sessions >/dev/null 2>&1; then
     fi
     if grep -q "SLACK_BOT_TOKEN=" .env 2>/dev/null && \
        ! grep -q "SLACK_BOT_TOKEN=$" .env 2>/dev/null; then
-        echo "  Slack:     @OpenTL in any channel"
+        echo "  Slack:     @TeleCoder in any channel"
     fi
 
     echo ""

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 
-// Types matching the OpenTL API.
+// Types matching the TeleCoder API.
 interface Session {
   id: string;
   repo: string;
@@ -113,8 +113,8 @@ function App() {
       <header className="bg-white border-b border-gray-200 px-6 py-4">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-bold text-gray-900">OpenTL</h1>
-            <p className="text-sm text-gray-500">Open Tech Lead</p>
+            <h1 className="text-xl font-bold text-gray-900">TeleCoder</h1>
+            <p className="text-sm text-gray-500">Background Coding Agent</p>
           </div>
           <a
             href="https://github.com/jxucoder/TeleCoder"

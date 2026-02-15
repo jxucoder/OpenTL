@@ -1,5 +1,5 @@
 #!/bin/bash
-# OpenTL Sandbox Entrypoint
+# TeleCoder Sandbox Entrypoint
 #
 # This script runs inside the Docker sandbox container. It:
 #   1. Clones the repository
@@ -8,37 +8,37 @@
 #   4. Signals completion back to the server
 #
 # Communication protocol:
-#   Lines prefixed with ###OPENTL_STATUS### are status updates
-#   Lines prefixed with ###OPENTL_ERROR###  are error messages
-#   Lines prefixed with ###OPENTL_DONE###   signal completion
+#   Lines prefixed with ###TELECODER_STATUS### are status updates
+#   Lines prefixed with ###TELECODER_ERROR###  are error messages
+#   Lines prefixed with ###TELECODER_DONE###   signal completion
 #   All other lines are agent output
 
 set -euo pipefail
 
 # --- Helpers ---
-emit_status() { echo "###OPENTL_STATUS### $1"; }
-emit_error()  { echo "###OPENTL_ERROR### $1"; }
-emit_done()   { echo "###OPENTL_DONE### $1"; }
+emit_status() { echo "###TELECODER_STATUS### $1"; }
+emit_error()  { echo "###TELECODER_ERROR### $1"; }
+emit_done()   { echo "###TELECODER_DONE### $1"; }
 
 # --- Validate required environment ---
-: "${OPENTL_REPO:?OPENTL_REPO is required}"
-: "${OPENTL_PROMPT:?OPENTL_PROMPT is required}"
-: "${OPENTL_BRANCH:?OPENTL_BRANCH is required}"
+: "${TELECODER_REPO:?TELECODER_REPO is required}"
+: "${TELECODER_PROMPT:?TELECODER_PROMPT is required}"
+: "${TELECODER_BRANCH:?TELECODER_BRANCH is required}"
 : "${GITHUB_TOKEN:?GITHUB_TOKEN is required}"
 
 # --- Clone repository ---
-emit_status "Cloning ${OPENTL_REPO}..."
+emit_status "Cloning ${TELECODER_REPO}..."
 
-CLONE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${OPENTL_REPO}.git"
+CLONE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${TELECODER_REPO}.git"
 git clone --depth=1 "${CLONE_URL}" /workspace/repo 2>&1
 cd /workspace/repo
 
 # Configure git identity.
-git config user.name "OpenTL"
-git config user.email "opentl@users.noreply.github.com"
+git config user.name "TeleCoder"
+git config user.email "telecoder@users.noreply.github.com"
 
 # Create the working branch.
-git checkout -b "${OPENTL_BRANCH}"
+git checkout -b "${TELECODER_BRANCH}"
 
 emit_status "Repository cloned successfully"
 
@@ -82,7 +82,7 @@ if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
 CFGEOF
 
     emit_status "Running OpenCode (Claude Opus 4.6)..."
-    opencode run -m "anthropic/claude-opus-4-6" "${OPENTL_PROMPT}" 2>&1 || {
+    opencode run -m "anthropic/claude-opus-4-6" "${TELECODER_PROMPT}" 2>&1 || {
         EXIT_CODE=$?
         if [ $EXIT_CODE -ne 0 ]; then
             emit_error "OpenCode agent exited with code ${EXIT_CODE}"
@@ -96,7 +96,7 @@ elif [ -n "${OPENAI_API_KEY:-}" ]; then
     codex exec \
         --full-auto \
         --ephemeral \
-        "${OPENTL_PROMPT}" 2>&1 || {
+        "${TELECODER_PROMPT}" 2>&1 || {
         EXIT_CODE=$?
         if [ $EXIT_CODE -ne 0 ]; then
             emit_error "Codex agent exited with code ${EXIT_CODE}"
@@ -122,7 +122,7 @@ if git diff --cached --quiet; then
 fi
 
 # Create a meaningful commit message.
-COMMIT_MSG="opentl: ${OPENTL_PROMPT}"
+COMMIT_MSG="telecoder: ${TELECODER_PROMPT}"
 # Truncate to 72 chars for git subject line.
 if [ ${#COMMIT_MSG} -gt 72 ]; then
     COMMIT_MSG="${COMMIT_MSG:0:69}..."
@@ -133,11 +133,11 @@ git commit -m "${COMMIT_MSG}" 2>&1
 emit_status "Changes committed"
 
 # --- Push branch ---
-emit_status "Pushing branch ${OPENTL_BRANCH}..."
+emit_status "Pushing branch ${TELECODER_BRANCH}..."
 
-git push origin "${OPENTL_BRANCH}" 2>&1
+git push origin "${TELECODER_BRANCH}" 2>&1
 
 emit_status "Branch pushed successfully"
 
 # --- Signal completion ---
-emit_done "${OPENTL_BRANCH}"
+emit_done "${TELECODER_BRANCH}"

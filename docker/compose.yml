@@ -1,4 +1,4 @@
-# OpenTL Server
+# TeleCoder Server
 #
 # Usage (from the project root):
 #   docker compose -f docker/compose.yml --env-file .env up -d
@@ -6,7 +6,7 @@
 # Or simply:
 #   make docker-up
 #
-# This starts the OpenTL server. Sandbox containers are created
+# This starts the TeleCoder server. Sandbox containers are created
 # dynamically by the server when sessions are started.
 
 services:
@@ -17,25 +17,25 @@ services:
     ports:
       - "7080:7080"
     volumes:
-      - opentl-data:/data
+      - telecoder-data:/data
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - path: ../.env
         required: false
-      - path: ${HOME}/.opentl/config.env
+      - path: ${HOME}/.telecoder/config.env
         required: false
     environment:
-      - OPENTL_ADDR=:7080
-      - OPENTL_DATA_DIR=/data
-      - OPENTL_DOCKER_IMAGE=opentl-sandbox
-      - OPENTL_DOCKER_NETWORK=opentl-net
+      - TELECODER_ADDR=:7080
+      - TELECODER_DATA_DIR=/data
+      - TELECODER_DOCKER_IMAGE=telecoder-sandbox
+      - TELECODER_DOCKER_NETWORK=telecoder-net
     networks:
-      - opentl-net
+      - telecoder-net
     restart: unless-stopped
 
 networks:
-  opentl-net:
-    name: opentl-net
+  telecoder-net:
+    name: telecoder-net
 
 volumes:
-  opentl-data:
+  telecoder-data:

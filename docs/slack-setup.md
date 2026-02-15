@@ -1,6 +1,6 @@
 # Slack Bot Setup
 
-OpenTL includes a Slack bot that lets you trigger coding tasks by mentioning `@OpenTL` in any channel. The bot uses **Socket Mode** (WebSocket), so no public URL is needed -- it works behind firewalls, NAT, or localhost.
+TeleCoder includes a Slack bot that lets you trigger coding tasks by mentioning `@TeleCoder` in any channel. The bot uses **Socket Mode** (WebSocket), so no public URL is needed -- it works behind firewalls, NAT, or localhost.
 
 ## How It Works
 
@@ -16,7 +16,7 @@ OpenTL includes a Slack bot that lets you trigger coding tasks by mentioning `@O
 
 1. Go to [https://api.slack.com/apps](https://api.slack.com/apps)
 2. Click **Create New App** > **From scratch**
-3. Name it `OpenTL` (or whatever you prefer)
+3. Name it `TeleCoder` (or whatever you prefer)
 4. Select your workspace
 5. Click **Create App**
 
@@ -55,7 +55,7 @@ OpenTL includes a Slack bot that lets you trigger coding tasks by mentioning `@O
 3. Review and allow the permissions
 4. **Copy the `xoxb-...` token** -- this is your `SLACK_BOT_TOKEN`
 
-## Configure OpenTL
+## Configure TeleCoder
 
 Set the following environment variables before starting the server:
 
@@ -82,7 +82,7 @@ Then start the server:
 
 ```bash
 # Direct
-opentl serve
+telecoder serve
 
 # Or with Docker Compose
 docker compose -f docker/compose.yml up -d
@@ -101,7 +101,7 @@ Slack: connected
 In Slack, go to the channel you want to use and type:
 
 ```
-/invite @OpenTL
+/invite @TeleCoder
 ```
 
 ## Usage
@@ -109,13 +109,13 @@ In Slack, go to the channel you want to use and type:
 Mention the bot with a task description:
 
 ```
-@OpenTL add rate limiting to the users API --repo your-org/your-repo
+@TeleCoder add rate limiting to the users API --repo your-org/your-repo
 ```
 
 If you configured `SLACK_DEFAULT_REPO`, you can omit `--repo`:
 
 ```
-@OpenTL fix the broken login page redirect
+@TeleCoder fix the broken login page redirect
 ```
 
 The bot will:
@@ -126,7 +126,7 @@ The bot will:
 
 ## Deployment
 
-The OpenTL server + Slack bot can run anywhere with Docker:
+The TeleCoder server + Slack bot can run anywhere with Docker:
 
 - **Local machine**: `docker compose up` (great for testing)
 - **Any VPS** (Hetzner, DigitalOcean, AWS EC2, etc.): clone the repo, set env vars, `docker compose up -d`
@@ -144,7 +144,7 @@ Since Socket Mode uses an outbound WebSocket connection, **no public URL or port
 
 | Issue | Fix |
 |---|---|
-| Bot doesn't respond | Make sure it's invited to the channel (`/invite @OpenTL`) |
+| Bot doesn't respond | Make sure it's invited to the channel (`/invite @TeleCoder`) |
 | "Connection error, will retry..." | Check that `SLACK_APP_TOKEN` starts with `xapp-` and Socket Mode is enabled |
 | "Invalid auth" | Check that `SLACK_BOT_TOKEN` starts with `xoxb-` and the app is installed |
 | Bot responds but sessions fail | Check `GITHUB_TOKEN` and `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` are set |

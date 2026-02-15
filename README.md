@@ -1,8 +1,8 @@
 <div align="center">
 
-# OpenTL
+# TeleCoder
 
-**Open Tech Lead** — a background coding agent for engineering teams.
+**An extensible background coding agent framework for engineering teams.**
 
 Send a task. Get a PR.
 
@@ -15,7 +15,7 @@ Send a task. Get a PR.
 ---
 
 ```
-opentl run "add rate limiting to /api/users" --repo myorg/myapp
+telecoderrun "add rate limiting to /api/users" --repo myorg/myapp
 # ...agent works in background...
 # -> PR #142 opened: https://github.com/myorg/myapp/pull/142
 ```
@@ -23,7 +23,7 @@ opentl run "add rate limiting to /api/users" --repo myorg/myapp
 ## How It Works
 
 1. You send a task — via **CLI**, **Slack**, or **Telegram**
-2. OpenTL spins up an **isolated Docker sandbox** with your repo
+2. TeleCoder spins up an **isolated Docker sandbox** with your repo
 3. A coding agent works on the task — [OpenCode](https://opencode.ai/) (Anthropic key) or [Codex](https://openai.com/index/codex/) (OpenAI key)
 4. Changes are committed, pushed, and a **PR is opened**
 5. You review the PR
@@ -34,9 +34,9 @@ graph LR
     Slack["Slack"]
     TG["Telegram"]
 
-    subgraph server ["OpenTL Server"]
-        Sessions["Sessions"]
-        Events["Event Stream"]
+    subgraph server ["TeleCoder Server"]
+        Engine["Engine"]
+        Pipeline["Pipeline\n(Plan→Code→Review)"]
         Sandbox["Docker Sandbox\n(Agent)"]
     end
 
@@ -47,6 +47,56 @@ graph LR
     TG --> server
     server --> GitHub
 ```
+
+## Framework
+
+TeleCoder is designed as a **pluggable Go framework**. Import it as a library, swap any component via interfaces, and compose a custom application in ~15 lines.
+
+### Minimal Usage
+
+```go
+package main
+
+import (
+    "context"
+    telecoder "github.com/jxucoder/TeleCoder"
+)
+
+func main() {
+    app, err := telecoder.NewBuilder().Build()
+    if err != nil {
+        panic(err)
+    }
+    app.Start(context.Background())
+}
+```
+
+### Custom Usage
+
+Swap out any component — store, sandbox, git provider, LLM, pipeline stages, channels:
+
+```go
+app, err := telecoder.NewBuilder().
+    WithConfig(telecoder.Config{ServerAddr: ":8080", MaxRevisions: 2}).
+    WithStore(myPostgresStore).
+    WithGitProvider(myGitLabProvider).
+    WithSandbox(myK8sRuntime).
+    WithLLM(myLLMClient).
+    WithChannel(myDiscordBot).
+    Build()
+```
+
+### Core Interfaces
+
+| Interface | Purpose | Built-in |
+|:----------|:--------|:---------|
+| `llm.Client` | LLM provider | Anthropic, OpenAI |
+| `store.SessionStore` | Persistence | SQLite |
+| `sandbox.Runtime` | Sandbox lifecycle | Docker |
+| `gitprovider.Provider` | Git hosting | GitHub |
+| `eventbus.Bus` | Real-time event pub/sub | In-memory |
+| `pipeline.Stage` | Orchestration stages | Plan, Review, Decompose |
+| `channel.Channel` | Input/output transport | Slack, Telegram |
 
 ## Quick Start
 
@@ -60,14 +110,14 @@ graph LR
 ### Install
 
 ```bash
-go install github.com/jxucoder/TeleCoder/cmd/opentl@latest
+go install github.com/jxucoder/TeleCoder/cmd/telecoder@latest
 ```
 
 Or build from source:
 
 ```bash
 git clone https://github.com/jxucoder/TeleCoder.git
-cd opentl
+cd TeleCoder
 make build
 ```
 
@@ -86,19 +136,19 @@ make sandbox-image
 
 ```bash
 # Start the server
-opentl serve
+telecoderserve
 
 # In another terminal — run a task
-opentl run "fix the typo in README.md" --repo yourorg/yourrepo
+telecoderrun "fix the typo in README.md" --repo yourorg/yourrepo
 
 # List sessions
-opentl list
+telecoderlist
 
 # Check a session's status
-opentl status <session-id>
+telecoderstatus <session-id>
 
 # Stream logs
-opentl logs <session-id> --follow
+telecoderlogs <session-id> --follow
 ```
 
 ### Docker Compose (fully containerized)
@@ -112,24 +162,28 @@ cp .env.example .env
 make docker-up
 
 # Run tasks against the server
-opentl run "your task" --repo owner/repo --server http://localhost:7080
+telecoderrun "your task" --repo owner/repo --server http://localhost:7080
 ```
 
 > See [docs/deploy.md](docs/deploy.md) for a full VPS deployment guide.
 
 ## Architecture
 
-OpenTL is a single binary — `opentl serve` runs the server, `opentl run` talks to it.
+TeleCoder is a single binary — `telecoderserve` runs the server, `telecoderrun` talks to it. Every component is swappable via interfaces.
 
-| Component | Description |
-|:----------|:------------|
-| **Server** | Go HTTP server. Manages sessions, streams events via SSE, and creates PRs. |
-| **Orchestrator** | Plan -> code -> review pipeline with optional task decomposition and revision rounds. |
-| **GitHub Context Indexer** | Fetches repo metadata/tree/key files to give the planner real codebase context. |
-| **Sandbox** | One Docker container per task (or persistent container for chat mode). Clones repo, runs coding agent (OpenCode/Codex), and pushes a branch. |
-| **CLI** | Creates sessions, streams logs, checks status. |
-| **Slack / Telegram** | Bot integrations — send tasks from chat, get PR links back. |
-| **Web UI** | React + Vite dashboard for monitoring sessions. |
+| Component | Package | Description |
+|:----------|:--------|:------------|
+| **Builder** | `telecoder` | Entry point. Composes all components via `NewBuilder().Build()`. |
+| **Engine** | `engine/` | Session orchestration — creates sessions, manages sandbox lifecycle, runs review/revision loops. |
+| **Pipeline** | `pipeline/` | Plan → code → review pipeline with optional task decomposition and configurable stages. |
+| **HTTP API** | `httpapi/` | Chi router. REST API + SSE streaming. Delegates all logic to engine. |
+| **Store** | `store/sqlite/` | SQLite persistence (WAL mode) for sessions, messages, events. |
+| **Sandbox** | `sandbox/docker/` | One Docker container per task (or persistent container for chat mode). |
+| **Git Provider** | `gitprovider/github/` | GitHub API — PR creation, repo indexing, webhook handling. |
+| **Event Bus** | `eventbus/` | In-memory pub/sub for real-time SSE events. |
+| **Channels** | `channel/slack/`, `channel/telegram/` | Bot integrations — send tasks from chat, get PR links back. |
+| **CLI** | `cmd/telecoder/` | Reference implementation. Creates sessions, streams logs, checks status. |
+| **Web UI** | `web/` | React + Vite dashboard for monitoring sessions. |
 
 ### API
 
@@ -154,42 +208,54 @@ All configuration is via environment variables:
 | `GITHUB_TOKEN` | Yes | — | GitHub personal access token |
 | `ANTHROPIC_API_KEY` | One of these | — | Anthropic API key |
 | `OPENAI_API_KEY` | One of these | — | OpenAI API key |
-| `OPENTL_ADDR` | No | `:7080` | Server listen address |
-| `OPENTL_DATA_DIR` | No | `~/.opentl` | Data directory for SQLite DB |
-| `OPENTL_DOCKER_IMAGE` | No | `opentl-sandbox` | Sandbox Docker image |
-| `OPENTL_DOCKER_NETWORK` | No | `opentl-net` | Docker network name |
-| `OPENTL_MAX_REVISIONS` | No | `1` | Max review/revision rounds per sub-task |
-| `OPENTL_CHAT_IDLE_TIMEOUT` | No | `30m` | Idle timeout for persistent chat sandboxes |
-| `OPENTL_CHAT_MAX_MESSAGES` | No | `50` | Max user messages per chat session |
-| `OPENTL_SERVER` | No | `http://localhost:7080` | Server URL (for CLI) |
+| `TELECODER_ADDR` | No | `:7080` | Server listen address |
+| `TELECODER_DATA_DIR` | No | `~/.telecoder` | Data directory for SQLite DB |
+| `TELECODER_DOCKER_IMAGE` | No | `telecoder-sandbox` | Sandbox Docker image |
+| `TELECODER_DOCKER_NETWORK` | No | `telecoder-net` | Docker network name |
+| `TELECODER_MAX_REVISIONS` | No | `1` | Max review/revision rounds per sub-task |
+| `TELECODER_CHAT_IDLE_TIMEOUT` | No | `30m` | Idle timeout for persistent chat sandboxes |
+| `TELECODER_CHAT_MAX_MESSAGES` | No | `50` | Max user messages per chat session |
+| `TELECODER_PLANNER_MODEL` | No | — | Override LLM model for pipeline stages |
+| `TELECODER_SERVER` | No | `http://localhost:7080` | Server URL (for CLI) |
 
 ## Project Structure
 
 ```
-OpenTL/
-├── cmd/opentl/           CLI + server entry point
-├── internal/
-│   ├── config/           Configuration from environment
-│   ├── github/           GitHub API + repo context indexing
-│   ├── orchestrator/     LLM planning, review, and decomposition
-│   ├── sandbox/          Docker container lifecycle
-│   ├── server/           HTTP API, session orchestration, SSE
-│   ├── session/          Session model, SQLite store, event bus
-│   ├── slack/            Slack bot integration
-│   └── telegram/         Telegram bot integration
+TeleCoder/
+├── telecoder.go              Builder, App, Config — top-level framework entry point
+├── defaults.go               Default wiring logic for Build()
+├── model/                    Foundation types (Session, Message, Event)
+├── llm/                      LLM Client interface
+│   ├── anthropic/            Anthropic implementation
+│   └── openai/               OpenAI implementation
+├── store/                    SessionStore interface
+│   └── sqlite/               SQLite implementation
+├── sandbox/                  Runtime interface
+│   └── docker/               Docker implementation
+├── gitprovider/              Provider interface
+│   └── github/               GitHub implementation (client, indexer, webhook)
+├── eventbus/                 Bus interface + InMemoryBus
+├── pipeline/                 Stage/Pipeline interfaces + built-in stages
+├── engine/                   Session orchestration logic
+├── httpapi/                  HTTP API handler (chi router, SSE)
+├── channel/                  Channel interface
+│   ├── slack/                Slack bot (Socket Mode)
+│   └── telegram/             Telegram bot (long polling)
+├── cmd/telecoder/               Reference CLI implementation
+├── web/                      React + Vite dashboard
 ├── docker/
-│   ├── base.Dockerfile   Sandbox image (Ubuntu + Node + Python + Go + agents)
-│   ├── server.Dockerfile Server image (minimal Alpine)
-│   ├── compose.yml       Docker Compose for local dev
-│   ├── entrypoint.sh     Sandbox entrypoint script
-│   └── setup.sh          Sandbox setup script
-├── web/                  React + Vite dashboard
-└── docs/                 Deployment & setup guides
+│   ├── base.Dockerfile       Sandbox image (Ubuntu + Node + Python + Go + agents)
+│   ├── server.Dockerfile     Server image (minimal Alpine)
+│   ├── compose.yml           Docker Compose for local dev
+│   ├── entrypoint.sh         Sandbox entrypoint script
+│   └── setup.sh              Sandbox setup script
+├── _examples/minimal/        Minimal framework usage example
+└── docs/                     Deployment & setup guides
 ```
 
 ## Roadmap
 
-### Phase 1 — MVP (current)
+### Phase 1 — MVP
 
 - [x] Server with REST API and SSE streaming
 - [x] Docker sandbox with pluggable agents (OpenCode, Codex)
@@ -206,7 +272,14 @@ OpenTL/
 - [x] Multi-step task decomposition
 - [x] Review-revision loop with configurable max rounds
 
-### Phase 3 — Scale
+### Phase 3 — Extensible Framework
+
+- [x] Interface-based architecture with 7 pluggable components
+- [x] Builder API for composing custom applications
+- [x] Extracted engine, pipeline, HTTP API into independent packages
+- [x] Framework importable as a Go library
+
+### Phase 4 — Scale
 
 - [ ] Sandbox pre-warming and caching
 - [ ] Modal / cloud sandbox provider

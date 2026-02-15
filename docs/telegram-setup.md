@@ -1,13 +1,13 @@
 # Telegram Bot Setup
 
-The simplest way to use OpenTL from your phone. Takes about 1 minute.
+The simplest way to use TeleCoder from your phone. Takes about 1 minute.
 
 ## Create the Bot
 
 1. Open Telegram and message [@BotFather](https://t.me/BotFather)
 2. Send `/newbot`
-3. Choose a name (e.g., "OpenTL")
-4. Choose a username (e.g., `my_opentl_bot`)
+3. Choose a name (e.g., "TeleCoder")
+4. Choose a username (e.g., `my_telecoder_bot`)
 5. Copy the token BotFather gives you
 
 ## Configure
@@ -31,13 +31,13 @@ TELEGRAM_DEFAULT_REPO=your-org/your-repo
 ## Start
 
 ```bash
-opentl serve
+telecoder serve
 ```
 
 You should see:
 
 ```
-Telegram bot authorized as @my_opentl_bot
+Telegram bot authorized as @my_telecoder_bot
 Telegram bot enabled (long polling)
 Telegram bot listening for messages...
 ```

@@ -1,6 +1,6 @@
-# Getting Started with OpenTL
+# Getting Started with TeleCoder
 
-This guide walks you through setting up and running OpenTL locally.
+This guide walks you through setting up and running TeleCoder locally.
 
 ## Prerequisites
 
@@ -15,16 +15,16 @@ This guide walks you through setting up and running OpenTL locally.
 
 ```bash
 git clone https://github.com/jxucoder/TeleCoder.git
-cd opentl
+cd TeleCoder
 make build
 ```
 
-The binary is at `./bin/opentl`.
+The binary is at `./bin/telecoder`.
 
 ### With `go install`
 
 ```bash
-go install github.com/jxucoder/TeleCoder/cmd/opentl@latest
+go install github.com/jxucoder/TeleCoder/cmd/telecoder@latest
 ```
 
 ## Configuration
@@ -41,8 +41,8 @@ export ANTHROPIC_API_KEY="sk-ant-..."   # Recommended
 export OPENAI_API_KEY="sk-..."
 
 # Optional: Server settings
-export OPENTL_ADDR=":7080"              # Default: :7080
-export OPENTL_DATA_DIR="~/.opentl"      # Default: ~/.opentl
+export TELECODER_ADDR=":7080"              # Default: :7080
+export TELECODER_DATA_DIR="~/.telecoder"      # Default: ~/.telecoder
 ```
 
 ## Build the Sandbox Image
@@ -53,18 +53,18 @@ The sandbox is a Docker image with a full development environment:
 make sandbox-image
 ```
 
-This builds the `opentl-sandbox` image with Ubuntu, Node.js, Python, Go, and OpenCode.
+This builds the `telecoder-sandbox` image with Ubuntu, Node.js, Python, Go, and OpenCode.
 
 ## Start the Server
 
 ```bash
-opentl serve
+telecoder serve
 ```
 
 You should see:
 
 ```
-OpenTL server listening on :7080
+TeleCoder server listening on :7080
 ```
 
 ## Run Your First Task
@@ -72,7 +72,7 @@ OpenTL server listening on :7080
 In a new terminal:
 
 ```bash
-opentl run "fix the typo in README.md" --repo yourorg/yourrepo
+telecoder run "fix the typo in README.md" --repo yourorg/yourrepo
 ```
 
 The CLI will:
@@ -84,19 +84,19 @@ The CLI will:
 
 ```bash
 # Run a task
-opentl run "task description" --repo owner/repo
+telecoder run "task description" --repo owner/repo
 
 # List all sessions
-opentl list
+telecoder list
 
 # Check session status
-opentl status <session-id>
+telecoder status <session-id>
 
 # Stream session logs
-opentl logs <session-id> --follow
+telecoder logs <session-id> --follow
 
 # Connect to a different server
-opentl run "task" --repo owner/repo --server http://remote-server:7080
+telecoder run "task" --repo owner/repo --server http://remote-server:7080
 ```
 
 ## Docker Compose (All-in-One)
@@ -114,7 +114,7 @@ EOF
 make docker-up
 
 # Run tasks
-opentl run "your task" --repo owner/repo
+telecoder run "your task" --repo owner/repo
 ```
 
 ## How It Works
@@ -131,7 +131,7 @@ opentl run "your task" --repo owner/repo
 
 ### "Is the server running?"
 
-Make sure `opentl serve` is running. The CLI defaults to `http://localhost:7080`.
+Make sure `telecoder serve` is running. The CLI defaults to `http://localhost:7080`.
 
 ### Docker permission denied
 
