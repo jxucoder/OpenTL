@@ -5,6 +5,11 @@
 //   - Chat mode (multi-turn): first message creates a persistent sandbox, subsequent
 //     messages are follow-ups. /pr creates the PR when you're ready.
 //
+// Session mapping:
+//   - In forum-style groups (Topics enabled): each topic = a separate session.
+//     Create a new topic = start a new session. Switch topics = switch sessions.
+//   - In DMs or regular groups: one active session per chat.
+//
 // Uses long polling — no public URL or webhook needed.
 package telegram
 
@@ -31,7 +36,7 @@ type ChatSessionCreator interface {
 	CreatePRFromChat(sessionID string) (string, int, error)
 }
 
-// chatState tracks the active chat session for a Telegram chat.
+// chatState tracks the active chat session for a Telegram conversation.
 type chatState struct {
 	sessionID string
 	repo      string
@@ -46,6 +51,8 @@ type Bot struct {
 	defaultRepo string
 
 	// chatSessions maps Telegram chatID -> active chat state.
+	// Each chat (DM or group) has its own session.
+	// For separate parallel sessions, use separate Telegram groups.
 	chatMu       sync.RWMutex
 	chatSessions map[int64]*chatState
 }
@@ -97,11 +104,11 @@ func (b *Bot) Run(ctx context.Context) error {
 // handleMessage routes incoming messages to the appropriate handler.
 func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 	text := strings.TrimSpace(msg.Text)
-	chatID := msg.Chat.ID
-
 	if text == "" {
 		return
 	}
+
+	chatID := msg.Chat.ID
 
 	// Handle commands.
 	if strings.HasPrefix(text, "/") {
@@ -117,6 +124,10 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) {
 func (b *Bot) handleCommand(chatID int64, replyTo int, text string) {
 	parts := strings.Fields(text)
 	cmd := strings.ToLower(parts[0])
+	// Strip @botname suffix from commands (e.g. /pr@mybot → /pr).
+	if at := strings.Index(cmd, "@"); at >= 0 {
+		cmd = cmd[:at]
+	}
 
 	switch cmd {
 	case "/start", "/help":
@@ -151,7 +162,7 @@ func (b *Bot) handleCommand(chatID int64, replyTo int, text string) {
 
 	case "/run":
 		// Legacy fire-and-forget mode.
-		prompt := strings.TrimSpace(strings.TrimPrefix(text, "/run"))
+		prompt := strings.TrimSpace(strings.TrimPrefix(text, parts[0]))
 		if prompt == "" {
 			b.sendReply(chatID, replyTo, "Usage: `/run fix the typo \\-\\-repo owner/repo`")
 			return
@@ -219,8 +230,8 @@ func (b *Bot) startNewSession(chatID int64, replyTo int, repo string) {
 		return
 	}
 
-	// Stop any existing session for this chat.
-	b.cleanupChat(chatID)
+	// Detach any existing session (don't stop it — it stays alive for the idle timeout).
+	b.detachSession(chatID)
 
 	b.sendReply(chatID, replyTo,
 		fmt.Sprintf("⚙ Starting new session for `%s`\\.\\.\\.", escapeMarkdown(repo)))
@@ -245,7 +256,7 @@ func (b *Bot) startNewSession(chatID int64, replyTo int, repo string) {
 
 // startNewSessionWithMessage creates a session and immediately sends the first message.
 func (b *Bot) startNewSessionWithMessage(chatID int64, replyTo int, repo, prompt string) {
-	b.cleanupChat(chatID)
+	b.detachSession(chatID)
 
 	b.sendReply(chatID, replyTo,
 		fmt.Sprintf("⚙ Starting session for `%s`\\.\\.\\.", escapeMarkdown(repo)))
@@ -304,10 +315,8 @@ func (b *Bot) handlePR(chatID int64, replyTo int) {
 			escapeMarkdown(prURL),
 			state.sessionID))
 
-	// Session is complete — remove the mapping.
-	b.chatMu.Lock()
-	delete(b.chatSessions, chatID)
-	b.chatMu.Unlock()
+	// Session is complete — detach the mapping.
+	b.detachSession(chatID)
 }
 
 func (b *Bot) handleDiff(chatID int64, replyTo int) {
@@ -323,12 +332,8 @@ func (b *Bot) handleDiff(chatID int64, replyTo int) {
 		return
 	}
 
-	// Get diff via the store's events (latest approach) or we need sandbox access.
-	// For now, emit a status event and let the server handle it.
 	b.sendReply(chatID, replyTo, "⚙ Fetching diff\\.\\.\\.")
 
-	// Use the server's event-based approach: the diff is available via the API.
-	// We'll just tell the user to check the session.
 	events, _ := b.store.GetEvents(state.sessionID, 0)
 	var lastOutput string
 	for _, e := range events {
@@ -389,7 +394,7 @@ func (b *Bot) handleStop(chatID int64, replyTo int) {
 		return
 	}
 
-	b.cleanupChat(chatID)
+	b.detachSession(chatID)
 	b.sendReply(chatID, replyTo, "✅ Session stopped\\.")
 }
 
@@ -559,8 +564,9 @@ func (b *Bot) getChatState(chatID int64) *chatState {
 	return b.chatSessions[chatID]
 }
 
-// cleanupChat removes the chat-to-session mapping for a Telegram chat.
-func (b *Bot) cleanupChat(chatID int64) {
+// detachSession removes the chat-to-session mapping without stopping the
+// sandbox. The session stays alive (idle reaper will clean it up after timeout).
+func (b *Bot) detachSession(chatID int64) {
 	b.chatMu.Lock()
 	delete(b.chatSessions, chatID)
 	b.chatMu.Unlock()
@@ -574,6 +580,8 @@ func (b *Bot) sendHelp(chatID int64, replyTo int) {
 		"`fix the login bug \\-\\-repo owner/repo`\n"+
 		"Then send follow\\-ups:\n"+
 		"`also add tests for the fix`\n\n"+
+		"*In a forum group:* each topic is a separate session\\.\n"+
+		"Create a new topic \\= start a new session\\.\n\n"+
 		"*Commands:*\n"+
 		"/new \\-\\- Start a fresh session\n"+
 		"/pr \\-\\- Create a PR from current changes\n"+
