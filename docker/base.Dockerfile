@@ -71,7 +71,7 @@ USER telecoder
 #   TELECODER_REPO        - Repository (owner/repo)
 #   TELECODER_PROMPT      - Task prompt
 #   TELECODER_BRANCH      - Git branch name
-#   TELECODER_AGENT_MODEL - OpenCode model (default: anthropic/claude-opus-4-6)
+#   TELECODER_AGENT_MODEL - Override OpenCode model (optional, auto-detects if unset)
 #   GITHUB_TOKEN       - GitHub access token
 #   ANTHROPIC_API_KEY  - Anthropic API key (optional)
 #   OPENAI_API_KEY     - OpenAI API key (optional)
