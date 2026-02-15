@@ -117,7 +117,7 @@ function App() {
             <p className="text-sm text-gray-500">Open Tech Lead</p>
           </div>
           <a
-            href="https://github.com/jxucoder/opentl"
+            href="https://github.com/jxucoder/TeleCoder"
             className="text-sm text-gray-500 hover:text-gray-900"
             target="_blank"
             rel="noreferrer"

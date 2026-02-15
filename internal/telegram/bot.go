@@ -23,7 +23,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/jxucoder/opentl/internal/session"
+	"github.com/jxucoder/TeleCoder/internal/session"
 )
 
 // ChatSessionCreator is the interface the server implements for chat sessions.

@@ -1,4 +1,4 @@
-module github.com/jxucoder/opentl
+module github.com/jxucoder/TeleCoder
 
 go 1.25.7
 

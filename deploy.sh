@@ -4,7 +4,7 @@
 #
 # One-command deployment for any fresh Ubuntu server (22.04+):
 #
-#   git clone https://github.com/jxucoder/opentl.git
+#   git clone https://github.com/jxucoder/TeleCoder.git
 #   cd opentl
 #   ./deploy.sh
 #

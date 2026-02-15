@@ -16,7 +16,7 @@ import (
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 
-	"github.com/jxucoder/opentl/internal/session"
+	"github.com/jxucoder/TeleCoder/internal/session"
 )
 
 // SessionCreator is the interface used to create and run sessions.

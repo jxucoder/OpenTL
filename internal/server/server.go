@@ -15,13 +15,13 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
-	"github.com/jxucoder/opentl/internal/config"
-	"github.com/jxucoder/opentl/internal/github"
-	"github.com/jxucoder/opentl/internal/orchestrator"
-	"github.com/jxucoder/opentl/internal/sandbox"
-	"github.com/jxucoder/opentl/internal/session"
-	opentlslack "github.com/jxucoder/opentl/internal/slack"
-	opentltelegram "github.com/jxucoder/opentl/internal/telegram"
+	"github.com/jxucoder/TeleCoder/internal/config"
+	"github.com/jxucoder/TeleCoder/internal/github"
+	"github.com/jxucoder/TeleCoder/internal/orchestrator"
+	"github.com/jxucoder/TeleCoder/internal/sandbox"
+	"github.com/jxucoder/TeleCoder/internal/session"
+	opentlslack "github.com/jxucoder/TeleCoder/internal/slack"
+	opentltelegram "github.com/jxucoder/TeleCoder/internal/telegram"
 )
 
 // Server is the OpenTL HTTP API server.
@@ -532,7 +532,7 @@ func (s *Server) CreatePRFromChat(sessionID string) (string, int, error) {
 			prBody += fmt.Sprintf("> **You:** %s\n\n", m.Content)
 		}
 	}
-	prBody += "---\n*Created by [OpenTL](https://github.com/jxucoder/opentl)*"
+	prBody += "---\n*Created by [OpenTL](https://github.com/jxucoder/TeleCoder)*"
 
 	prURL, prNumber, err := s.github.CreatePR(ctx, github.PROptions{
 		Repo:   sess.Repo,
@@ -852,7 +852,7 @@ func (s *Server) runSession(sessionID string) {
 	}
 
 	prTitle := fmt.Sprintf("opentl: %s", session.Truncate(sess.Prompt, 72))
-	prBody := fmt.Sprintf("## OpenTL Session `%s`\n\n**Prompt:**\n> %s\n\n---\n*Created by [OpenTL](https://github.com/jxucoder/opentl)*",
+	prBody := fmt.Sprintf("## OpenTL Session `%s`\n\n**Prompt:**\n> %s\n\n---\n*Created by [OpenTL](https://github.com/jxucoder/TeleCoder)*",
 		sess.ID, sess.Prompt)
 
 	prURL, prNumber, err := s.github.CreatePR(ctx, github.PROptions{

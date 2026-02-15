@@ -60,13 +60,13 @@ graph LR
 ### Install
 
 ```bash
-go install github.com/jxucoder/opentl/cmd/opentl@latest
+go install github.com/jxucoder/TeleCoder/cmd/opentl@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/jxucoder/opentl.git
+git clone https://github.com/jxucoder/TeleCoder.git
 cd opentl
 make build
 ```

@@ -21,7 +21,7 @@ When creating the server, choose **Ubuntu 24.04**. Add your SSH key.
 ```bash
 ssh root@YOUR_SERVER_IP
 
-git clone https://github.com/jxucoder/opentl.git
+git clone https://github.com/jxucoder/TeleCoder.git
 cd opentl
 ./deploy.sh
 ```

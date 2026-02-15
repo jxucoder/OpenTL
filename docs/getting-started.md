@@ -14,7 +14,7 @@ This guide walks you through setting up and running OpenTL locally.
 ### From source (recommended for development)
 
 ```bash
-git clone https://github.com/jxucoder/opentl.git
+git clone https://github.com/jxucoder/TeleCoder.git
 cd opentl
 make build
 ```
@@ -24,7 +24,7 @@ The binary is at `./bin/opentl`.
 ### With `go install`
 
 ```bash
-go install github.com/jxucoder/opentl/cmd/opentl@latest
+go install github.com/jxucoder/TeleCoder/cmd/opentl@latest
 ```
 
 ## Configuration

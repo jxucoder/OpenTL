@@ -9,8 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/jxucoder/opentl/internal/config"
-	"github.com/jxucoder/opentl/internal/server"
+	"github.com/jxucoder/TeleCoder/internal/config"
+	"github.com/jxucoder/TeleCoder/internal/server"
 )
 
 var serveCmd = &cobra.Command{
