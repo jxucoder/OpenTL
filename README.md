@@ -162,18 +162,21 @@ OpenTL/
 ├── cmd/opentl/           CLI + server entry point
 ├── internal/
 │   ├── config/           Configuration from environment
+│   ├── decomposer/       Multi-step task decomposition
+│   ├── github/           GitHub API (PR creation)
+│   ├── indexer/          Repo-aware context indexing
+│   ├── orchestrator/     LLM-driven planning layer
+│   ├── sandbox/          Docker container lifecycle
 │   ├── server/           HTTP API, session orchestration, SSE
 │   ├── session/          Session model, SQLite store, event bus
-│   ├── sandbox/          Docker container lifecycle
-│   ├── github/           GitHub API (PR creation)
-│   ├── orchestrator/     LLM-driven planning layer
 │   ├── slack/            Slack bot integration
 │   └── telegram/         Telegram bot integration
 ├── docker/
 │   ├── base.Dockerfile   Sandbox image (Ubuntu + Node + Python + Go + agents)
 │   ├── server.Dockerfile Server image (minimal Alpine)
 │   ├── compose.yml       Docker Compose for local dev
-│   └── entrypoint.sh     Sandbox entrypoint script
+│   ├── entrypoint.sh     Sandbox entrypoint script
+│   └── setup.sh          Sandbox setup script
 ├── web/                  React + Vite dashboard
 └── docs/                 Deployment & setup guides
 ```
