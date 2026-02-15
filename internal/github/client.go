@@ -70,6 +70,105 @@ func (c *Client) GetDefaultBranch(ctx context.Context, repoFullName string) (str
 	return r.GetDefaultBranch(), nil
 }
 
+// PRComment represents a comment on a pull request.
+type PRComment struct {
+	ID     int64  // GitHub comment ID
+	Body   string // comment text
+	User   string // GitHub login of the commenter
+	Path   string // file path (only for review comments, empty for issue comments)
+	Line   int    // line number (only for review comments)
+	InReplyTo int64 // parent comment ID for threaded replies
+}
+
+// ListPRComments returns all issue comments on a pull request.
+func (c *Client) ListPRComments(ctx context.Context, repoFullName string, prNumber int) ([]PRComment, error) {
+	owner, repo, err := splitRepo(repoFullName)
+	if err != nil {
+		return nil, err
+	}
+
+	ghComments, _, err := c.gh.Issues.ListComments(ctx, owner, repo, prNumber, &gogh.IssueListCommentsOptions{
+		Sort:      gogh.Ptr("created"),
+		Direction: gogh.Ptr("desc"),
+		ListOptions: gogh.ListOptions{PerPage: 30},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing PR comments: %w", err)
+	}
+
+	var comments []PRComment
+	for _, gc := range ghComments {
+		comments = append(comments, PRComment{
+			ID:   gc.GetID(),
+			Body: gc.GetBody(),
+			User: gc.GetUser().GetLogin(),
+		})
+	}
+	return comments, nil
+}
+
+// ListPRReviewComments returns all review (inline) comments on a pull request.
+func (c *Client) ListPRReviewComments(ctx context.Context, repoFullName string, prNumber int) ([]PRComment, error) {
+	owner, repo, err := splitRepo(repoFullName)
+	if err != nil {
+		return nil, err
+	}
+
+	ghComments, _, err := c.gh.PullRequests.ListComments(ctx, owner, repo, prNumber, &gogh.PullRequestListCommentsOptions{
+		Sort:      "created",
+		Direction: "desc",
+		ListOptions: gogh.ListOptions{PerPage: 30},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("listing PR review comments: %w", err)
+	}
+
+	var comments []PRComment
+	for _, gc := range ghComments {
+		comments = append(comments, PRComment{
+			ID:        gc.GetID(),
+			Body:      gc.GetBody(),
+			User:      gc.GetUser().GetLogin(),
+			Path:      gc.GetPath(),
+			Line:      gc.GetLine(),
+			InReplyTo: gc.GetInReplyTo(),
+		})
+	}
+	return comments, nil
+}
+
+// ReplyToPRComment posts a reply as an issue comment on the pull request.
+func (c *Client) ReplyToPRComment(ctx context.Context, repoFullName string, prNumber int, body string) error {
+	owner, repo, err := splitRepo(repoFullName)
+	if err != nil {
+		return err
+	}
+
+	_, _, err = c.gh.Issues.CreateComment(ctx, owner, repo, prNumber, &gogh.IssueComment{
+		Body: gogh.Ptr(body),
+	})
+	if err != nil {
+		return fmt.Errorf("posting PR comment: %w", err)
+	}
+	return nil
+}
+
+// GetPRDiff returns the diff of a pull request.
+func (c *Client) GetPRDiff(ctx context.Context, repoFullName string, prNumber int) (string, error) {
+	owner, repo, err := splitRepo(repoFullName)
+	if err != nil {
+		return "", err
+	}
+
+	diff, _, err := c.gh.PullRequests.GetRaw(ctx, owner, repo, prNumber, gogh.RawOptions{
+		Type: gogh.Diff,
+	})
+	if err != nil {
+		return "", fmt.Errorf("getting PR diff: %w", err)
+	}
+	return diff, nil
+}
+
 func splitRepo(fullName string) (owner, repo string, err error) {
 	parts := strings.SplitN(fullName, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {

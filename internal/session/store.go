@@ -261,6 +261,19 @@ func (s *Store) GetEvents(sessionID string, afterID int64) ([]*Event, error) {
 	return events, rows.Err()
 }
 
+// GetSessionByPR retrieves a session by its PR number and repository.
+func (s *Store) GetSessionByPR(repo string, prNumber int) (*Session, error) {
+	row := s.db.QueryRow(
+		`SELECT id, repo, prompt, mode, status, branch, pr_url, pr_number,
+		        container_id, error, created_at, updated_at
+		 FROM sessions
+		 WHERE repo = ? AND pr_number = ?
+		 ORDER BY created_at DESC
+		 LIMIT 1`, repo, prNumber,
+	)
+	return scanSession(row)
+}
+
 // --- Scan helpers ---
 
 type scannable interface {
