@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -83,49 +80,8 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 func runLogs(cmd *cobra.Command, args []string) error {
 	id := args[0]
-
 	if logsFollow {
 		return streamEvents(id)
 	}
-
-	// Non-follow mode: fetch events and print.
-	req, _ := http.NewRequest("GET", serverURL+"/api/sessions/"+id+"/events", nil)
-	req.Header.Set("Accept", "text/event-stream")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("connecting to server: %w", err)
-	}
-	defer resp.Body.Close()
-
-	scanner := bufio.NewScanner(resp.Body)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if !strings.HasPrefix(line, "data: ") {
-			continue
-		}
-
-		data := strings.TrimPrefix(line, "data: ")
-		var event struct {
-			Type string `json:"type"`
-			Data string `json:"data"`
-		}
-		if err := json.Unmarshal([]byte(data), &event); err != nil {
-			continue
-		}
-
-		switch event.Type {
-		case "status":
-			fmt.Printf("\033[36m[status]\033[0m %s\n", event.Data)
-		case "output":
-			fmt.Println(event.Data)
-		case "error":
-			fmt.Fprintf(os.Stderr, "\033[31m[error]\033[0m %s\n", event.Data)
-		case "done":
-			fmt.Printf("\n\033[32m✓ Done:\033[0m %s\n", event.Data)
-			return nil
-		}
-	}
-
-	return scanner.Err()
+	return streamEvents(id)
 }

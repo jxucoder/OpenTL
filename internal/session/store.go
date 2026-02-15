@@ -66,6 +66,22 @@ type Event struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// Truncate shortens a string to maxLen runes, adding "..." if truncated.
+func Truncate(s string, maxLen int) string {
+	if maxLen <= 3 {
+		r := []rune(s)
+		if len(r) <= maxLen {
+			return s
+		}
+		return string(r[:maxLen])
+	}
+	r := []rune(s)
+	if len(r) <= maxLen {
+		return s
+	}
+	return string(r[:maxLen-3]) + "..."
+}
+
 // Store manages session and event persistence in SQLite.
 type Store struct {
 	db *sql.DB
@@ -179,7 +195,7 @@ func (s *Store) ListSessions() ([]*Session, error) {
 
 	var sessions []*Session
 	for rows.Next() {
-		sess, err := scanSessionRows(rows)
+		sess, err := scanSession(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -254,19 +270,6 @@ type scannable interface {
 func scanSession(row scannable) (*Session, error) {
 	sess := &Session{}
 	err := row.Scan(
-		&sess.ID, &sess.Repo, &sess.Prompt, &sess.Mode, &sess.Status,
-		&sess.Branch, &sess.PRUrl, &sess.PRNumber,
-		&sess.ContainerID, &sess.Error, &sess.CreatedAt, &sess.UpdatedAt,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return sess, nil
-}
-
-func scanSessionRows(rows *sql.Rows) (*Session, error) {
-	sess := &Session{}
-	err := rows.Scan(
 		&sess.ID, &sess.Repo, &sess.Prompt, &sess.Mode, &sess.Status,
 		&sess.Branch, &sess.PRUrl, &sess.PRNumber,
 		&sess.ContainerID, &sess.Error, &sess.CreatedAt, &sess.UpdatedAt,

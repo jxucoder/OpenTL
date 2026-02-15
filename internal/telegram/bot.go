@@ -135,14 +135,9 @@ func (b *Bot) handleCommand(chatID int64, replyTo int, text string) {
 
 	case "/new":
 		// /new [--repo owner/repo]
-		repo := b.defaultRepo
 		args := strings.Join(parts[1:], " ")
-		if idx := strings.Index(args, "--repo "); idx >= 0 {
-			repoParts := strings.Fields(args[idx+7:])
-			if len(repoParts) > 0 {
-				repo = repoParts[0]
-			}
-		} else if len(parts) > 1 && strings.Contains(parts[1], "/") {
+		_, repo := session.ParseRepoFlag(args, b.defaultRepo)
+		if repo == b.defaultRepo && len(parts) > 1 && strings.Contains(parts[1], "/") {
 			// Allow /new owner/repo shorthand.
 			repo = parts[1]
 		}
@@ -184,15 +179,7 @@ func (b *Bot) handleChatMessage(chatID int64, replyTo int, text string) {
 
 	if state == nil {
 		// No active session — check if the message includes --repo.
-		repo := b.defaultRepo
-		prompt := text
-		if idx := strings.Index(text, "--repo "); idx >= 0 {
-			parts := strings.Fields(text[idx+7:])
-			if len(parts) > 0 {
-				repo = parts[0]
-				prompt = strings.TrimSpace(text[:idx])
-			}
-		}
+		prompt, repo := session.ParseRepoFlag(text, b.defaultRepo)
 
 		if repo == "" {
 			b.sendReply(chatID, replyTo,
@@ -211,7 +198,7 @@ func (b *Bot) handleChatMessage(chatID int64, replyTo int, text string) {
 	// Active session exists — send the message.
 	b.sendChatAction(chatID) // Show "typing" indicator.
 
-	msg, err := b.sessions.SendChatMessage(state.sessionID, text)
+	_, err := b.sessions.SendChatMessage(state.sessionID, text)
 	if err != nil {
 		b.sendReply(chatID, replyTo,
 			fmt.Sprintf("⚠️ %s", escapeMarkdown(err.Error())))
@@ -219,7 +206,11 @@ func (b *Bot) handleChatMessage(chatID int64, replyTo int, text string) {
 	}
 
 	// Monitor the session for this message's output.
-	b.monitorUntilIdle(state.sessionID, chatID, replyTo, msg.ID)
+	b.monitorEvents(state.sessionID, chatID, replyTo, monitorOpts{
+		stopOnIdle:   true,
+		bufferOutput: true,
+		showDone:     true,
+	})
 }
 
 // startNewSession creates a fresh chat session (without an initial message).
@@ -251,7 +242,11 @@ func (b *Bot) startNewSession(chatID int64, replyTo int, repo string) {
 	b.chatMu.Unlock()
 
 	// Monitor setup events until the session is idle.
-	b.monitorUntilIdle(sess.ID, chatID, replyTo, 0)
+	b.monitorEvents(sess.ID, chatID, replyTo, monitorOpts{
+		stopOnIdle:   true,
+		bufferOutput: true,
+		showDone:     true,
+	})
 }
 
 // startNewSessionWithMessage creates a session and immediately sends the first message.
@@ -277,17 +272,23 @@ func (b *Bot) startNewSessionWithMessage(chatID int64, replyTo int, repo, prompt
 	b.chatMu.Unlock()
 
 	// Wait for session to become idle (setup complete), then send the message.
-	b.waitForIdle(sess.ID, chatID, replyTo)
+	b.monitorEvents(sess.ID, chatID, replyTo, monitorOpts{
+		stopOnIdle: true,
+	})
 
 	// Now send the first message.
-	msg, err := b.sessions.SendChatMessage(sess.ID, prompt)
+	_, err = b.sessions.SendChatMessage(sess.ID, prompt)
 	if err != nil {
 		b.sendReply(chatID, replyTo,
 			fmt.Sprintf("⚠️ %s", escapeMarkdown(err.Error())))
 		return
 	}
 
-	b.monitorUntilIdle(sess.ID, chatID, replyTo, msg.ID)
+	b.monitorEvents(sess.ID, chatID, replyTo, monitorOpts{
+		stopOnIdle:   true,
+		bufferOutput: true,
+		showDone:     true,
+	})
 }
 
 // --- Command handlers ---
@@ -400,16 +401,7 @@ func (b *Bot) handleStop(chatID int64, replyTo int) {
 
 // handleLegacyRun runs a one-shot task (fire-and-forget mode).
 func (b *Bot) handleLegacyRun(chatID int64, replyTo int, text string) {
-	prompt := text
-	repo := b.defaultRepo
-
-	if idx := strings.Index(prompt, "--repo "); idx >= 0 {
-		parts := strings.Fields(prompt[idx+7:])
-		if len(parts) > 0 {
-			repo = parts[0]
-			prompt = strings.TrimSpace(prompt[:idx])
-		}
-	}
+	prompt, repo := session.ParseRepoFlag(text, b.defaultRepo)
 
 	if repo == "" {
 		b.sendReply(chatID, replyTo,
@@ -431,21 +423,30 @@ func (b *Bot) handleLegacyRun(chatID int64, replyTo int, text string) {
 	b.sendReply(chatID, replyTo,
 		fmt.Sprintf("Session `%s` created\\. I'll send the PR when it's done\\.", sess.ID))
 
-	go b.monitorTaskSession(sess, chatID, replyTo)
+	go b.monitorEvents(sess.ID, chatID, replyTo, monitorOpts{
+		showDonePR: true,
+	})
 }
 
 // --- Event monitoring ---
 
-// monitorUntilIdle subscribes to events and relays them until the session
-// reaches "idle" or "Ready" status, or an error/done event.
-func (b *Bot) monitorUntilIdle(sessionID string, chatID int64, replyTo int, afterMsgID int64) {
+type monitorOpts struct {
+	stopOnIdle   bool
+	bufferOutput bool
+	showDone     bool
+	showDonePR   bool
+}
+
+func (b *Bot) monitorEvents(sessionID string, chatID int64, replyTo int, opts monitorOpts) {
 	ch := b.bus.Subscribe(sessionID)
 	defer b.bus.Unsubscribe(sessionID, ch)
 
-	// Buffer output to avoid flooding Telegram (batch every 2s).
 	var outputBuf strings.Builder
-	flushTicker := time.NewTicker(2 * time.Second)
-	defer flushTicker.Stop()
+	var flushTicker *time.Ticker
+	if opts.bufferOutput {
+		flushTicker = time.NewTicker(2 * time.Second)
+		defer flushTicker.Stop()
+	}
 
 	flush := func() {
 		if outputBuf.Len() == 0 {
@@ -461,6 +462,11 @@ func (b *Bot) monitorUntilIdle(sessionID string, chatID int64, replyTo int, afte
 		b.sendReply(chatID, replyTo, fmt.Sprintf("```\n%s\n```", escapeMarkdown(text)))
 	}
 
+	flushC := (<-chan time.Time)(nil)
+	if flushTicker != nil {
+		flushC = flushTicker.C
+	}
+
 	for {
 		select {
 		case event, ok := <-ch:
@@ -472,7 +478,7 @@ func (b *Bot) monitorUntilIdle(sessionID string, chatID int64, replyTo int, afte
 			switch event.Type {
 			case "status":
 				flush() // Flush any buffered output first.
-				if event.Data == "Ready" || strings.HasPrefix(event.Data, "Ready") {
+				if opts.stopOnIdle && (event.Data == "Ready" || strings.HasPrefix(event.Data, "Ready")) {
 					b.sendReply(chatID, replyTo,
 						fmt.Sprintf("✅ %s", escapeMarkdown(event.Data)))
 					return
@@ -493,65 +499,23 @@ func (b *Bot) monitorUntilIdle(sessionID string, chatID int64, replyTo int, afte
 
 			case "done":
 				flush()
-				b.sendReply(chatID, replyTo,
-					fmt.Sprintf("✅ Done: %s", escapeMarkdown(event.Data)))
+				if opts.showDonePR {
+					updated, err := b.store.GetSession(sessionID)
+					if err != nil {
+						b.sendReply(chatID, replyTo, fmt.Sprintf("✅ Done\\.\n%s", escapeMarkdown(event.Data)))
+						return
+					}
+					b.sendPRMessage(chatID, replyTo, updated)
+					return
+				}
+				if opts.showDone {
+					b.sendReply(chatID, replyTo, fmt.Sprintf("✅ Done: %s", escapeMarkdown(event.Data)))
+				}
 				return
 			}
 
-		case <-flushTicker.C:
+		case <-flushC:
 			flush()
-		}
-	}
-}
-
-// waitForIdle blocks until the session reaches idle status.
-func (b *Bot) waitForIdle(sessionID string, chatID int64, replyTo int) {
-	ch := b.bus.Subscribe(sessionID)
-	defer b.bus.Unsubscribe(sessionID, ch)
-
-	for event := range ch {
-		switch event.Type {
-		case "status":
-			if event.Data == "Ready" || strings.HasPrefix(event.Data, "Ready") {
-				b.sendReply(chatID, replyTo,
-					fmt.Sprintf("✅ %s", escapeMarkdown(event.Data)))
-				return
-			}
-			b.sendReply(chatID, replyTo,
-				fmt.Sprintf("⚙ %s", escapeMarkdown(event.Data)))
-			b.sendChatAction(chatID)
-		case "error":
-			b.sendReply(chatID, replyTo,
-				fmt.Sprintf("❌ %s", escapeMarkdown(event.Data)))
-			return
-		}
-	}
-}
-
-// monitorTaskSession monitors a legacy fire-and-forget session.
-func (b *Bot) monitorTaskSession(sess *session.Session, chatID int64, replyTo int) {
-	ch := b.bus.Subscribe(sess.ID)
-	defer b.bus.Unsubscribe(sess.ID, ch)
-
-	for event := range ch {
-		switch event.Type {
-		case "status":
-			b.sendReply(chatID, replyTo,
-				fmt.Sprintf("⚙ %s", escapeMarkdown(event.Data)))
-
-		case "error":
-			b.sendReply(chatID, replyTo,
-				fmt.Sprintf("❌ *Error:* %s", escapeMarkdown(event.Data)))
-
-		case "done":
-			updated, err := b.store.GetSession(sess.ID)
-			if err != nil {
-				b.sendReply(chatID, replyTo,
-					fmt.Sprintf("✅ Done\\.\n%s", escapeMarkdown(event.Data)))
-				return
-			}
-			b.sendPRMessage(chatID, replyTo, updated)
-			return
 		}
 	}
 }
@@ -603,7 +567,7 @@ func (b *Bot) sendPRMessage(chatID int64, replyTo int, sess *session.Session) {
 			"[PR \\#%d: %s](%s)\n\n"+
 			"Session `%s` \\| Repo `%s` \\| Branch `%s`",
 		sess.PRNumber,
-		escapeMarkdown(truncate(sess.Prompt, 60)),
+		escapeMarkdown(session.Truncate(sess.Prompt, 60)),
 		escapeMarkdown(sess.PRUrl),
 		sess.ID,
 		escapeMarkdown(sess.Repo),
@@ -682,12 +646,4 @@ func stripMarkdown(s string) string {
 		"\\!", "!",
 	)
 	return r.Replace(s)
-}
-
-// truncate shortens a string to maxLen.
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }

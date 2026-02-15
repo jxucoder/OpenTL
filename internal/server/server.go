@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -15,9 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/jxucoder/opentl/internal/config"
-	"github.com/jxucoder/opentl/internal/decomposer"
 	"github.com/jxucoder/opentl/internal/github"
-	"github.com/jxucoder/opentl/internal/indexer"
 	"github.com/jxucoder/opentl/internal/orchestrator"
 	"github.com/jxucoder/opentl/internal/sandbox"
 	"github.com/jxucoder/opentl/internal/session"
@@ -36,6 +35,9 @@ type Server struct {
 	router       chi.Router
 	slackBot     *opentlslack.Bot    // nil if Slack is not configured
 	telegramBot  *opentltelegram.Bot // nil if Telegram is not configured
+	ctx          context.Context
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
 }
 
 // New creates a new Server with all dependencies.
@@ -101,25 +103,35 @@ func New(cfg *config.Config) (*Server, error) {
 
 // Start starts the HTTP server and (optionally) the Slack bot.
 func (s *Server) Start(ctx context.Context) error {
+	s.ctx, s.cancel = context.WithCancel(ctx)
+
 	// Ensure Docker network exists.
-	if err := s.sandbox.EnsureNetwork(ctx, s.config.DockerNetwork); err != nil {
+	if err := s.sandbox.EnsureNetwork(s.ctx, s.config.DockerNetwork); err != nil {
 		log.Printf("Warning: could not create Docker network: %v", err)
 	}
 
 	// Start idle chat session reaper.
-	go s.reapIdleChatSessions(ctx)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.reapIdleChatSessions(s.ctx)
+	}()
 
 	// Start chat bots in background if configured.
 	if s.slackBot != nil {
+		s.wg.Add(1)
 		go func() {
-			if err := s.slackBot.Run(ctx); err != nil {
+			defer s.wg.Done()
+			if err := s.slackBot.Run(s.ctx); err != nil {
 				log.Printf("Slack bot error: %v", err)
 			}
 		}()
 	}
 	if s.telegramBot != nil {
+		s.wg.Add(1)
 		go func() {
-			if err := s.telegramBot.Run(ctx); err != nil {
+			defer s.wg.Done()
+			if err := s.telegramBot.Run(s.ctx); err != nil {
 				log.Printf("Telegram bot error: %v", err)
 			}
 		}()
@@ -132,6 +144,9 @@ func (s *Server) Start(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
+		if s.cancel != nil {
+			s.cancel()
+		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		srv.Shutdown(shutdownCtx)
@@ -141,6 +156,7 @@ func (s *Server) Start(ctx context.Context) error {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
+	s.wg.Wait()
 	return s.store.Close()
 }
 
@@ -148,17 +164,19 @@ func (s *Server) buildRouter() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(5 * time.Minute))
 
 	r.Route("/api", func(r chi.Router) {
-		r.Post("/sessions", s.handleCreateSession)
-		r.Get("/sessions", s.handleListSessions)
-		r.Get("/sessions/{id}", s.handleGetSession)
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Timeout(30 * time.Second))
+			r.Post("/sessions", s.handleCreateSession)
+			r.Get("/sessions", s.handleListSessions)
+			r.Get("/sessions/{id}", s.handleGetSession)
+			r.Get("/sessions/{id}/messages", s.handleGetMessages)
+			r.Post("/sessions/{id}/messages", s.handleSendMessage)
+			r.Post("/sessions/{id}/pr", s.handleCreatePR)
+			r.Post("/sessions/{id}/stop", s.handleStopSession)
+		})
 		r.Get("/sessions/{id}/events", s.handleSessionEvents)
-		r.Get("/sessions/{id}/messages", s.handleGetMessages)
-		r.Post("/sessions/{id}/messages", s.handleSendMessage)
-		r.Post("/sessions/{id}/pr", s.handleCreatePR)
-		r.Post("/sessions/{id}/stop", s.handleStopSession)
 	})
 
 	// Health check.
@@ -226,7 +244,11 @@ func (s *Server) CreateAndRunSession(repo, prompt string) (*session.Session, err
 	}
 
 	// Start sandbox in background.
-	go s.runSession(sess)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.runSession(sess.ID)
+	}()
 
 	return sess, nil
 }
@@ -255,24 +277,37 @@ func (s *Server) CreateChatSession(repo string) (*session.Session, error) {
 	}
 
 	// Start persistent sandbox in background and set up the repo.
-	go s.initChatSession(sess)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.initChatSession(sess.ID)
+	}()
 
 	return sess, nil
 }
 
 // initChatSession starts a persistent container and runs setup.sh.
-func (s *Server) initChatSession(sess *session.Session) {
-	ctx := context.Background()
+func (s *Server) initChatSession(sessionID string) {
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sess, err := s.store.GetSession(sessionID)
+	if err != nil {
+		log.Printf("chat session %s not found during init: %v", sessionID, err)
+		return
+	}
 
 	s.emitEvent(sess.ID, "status", "Starting sandbox...")
 
-	containerID, err := s.sandbox.StartPersistent(ctx, sandbox.StartOptions{
-		SessionID: sess.ID,
-		Repo:      sess.Repo,
-		Branch:    sess.Branch,
-		Image:     s.config.DockerImage,
-		Env:       s.config.SandboxEnv(),
-		Network:   s.config.DockerNetwork,
+	containerID, err := s.sandbox.Start(ctx, sandbox.StartOptions{
+		SessionID:  sess.ID,
+		Repo:       sess.Repo,
+		Branch:     sess.Branch,
+		Persistent: true,
+		Image:      s.config.DockerImage,
+		Env:        s.config.SandboxEnv(),
+		Network:    s.config.DockerNetwork,
 	})
 	if err != nil {
 		s.failSession(sess, fmt.Sprintf("failed to start sandbox: %v", err))
@@ -291,17 +326,7 @@ func (s *Server) initChatSession(sess *session.Session) {
 	}
 
 	for setupStream.Scan() {
-		line := setupStream.Text()
-		switch {
-		case strings.HasPrefix(line, "###OPENTL_STATUS### "):
-			msg := strings.TrimPrefix(line, "###OPENTL_STATUS### ")
-			s.emitEvent(sess.ID, "status", msg)
-		case strings.HasPrefix(line, "###OPENTL_ERROR### "):
-			msg := strings.TrimPrefix(line, "###OPENTL_ERROR### ")
-			s.emitEvent(sess.ID, "error", msg)
-		default:
-			s.emitEvent(sess.ID, "output", line)
-		}
+		s.dispatchLogLine(sess.ID, setupStream.Text())
 	}
 	setupStream.Close()
 
@@ -324,6 +349,7 @@ func (s *Server) reapIdleChatSessions(ctx context.Context) {
 		case <-ticker.C:
 			sessions, err := s.store.ListSessions()
 			if err != nil {
+				log.Printf("reaper: list sessions failed: %v", err)
 				continue
 			}
 			for _, sess := range sessions {
@@ -386,14 +412,26 @@ func (s *Server) SendChatMessage(sessionID, content string) (*session.Message, e
 	}
 
 	// Run the agent in the background.
-	go s.runChatMessage(sess, msg)
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.runChatMessage(sessionID, msg.Content)
+	}()
 
 	return msg, nil
 }
 
 // runChatMessage executes the coding agent for a single chat message.
-func (s *Server) runChatMessage(sess *session.Session, msg *session.Message) {
-	ctx := context.Background()
+func (s *Server) runChatMessage(sessionID, content string) {
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sess, err := s.store.GetSession(sessionID)
+	if err != nil {
+		log.Printf("chat session %s not found while running message: %v", sessionID, err)
+		return
+	}
 
 	// Mark session as running.
 	sess.Status = session.StatusRunning
@@ -403,7 +441,7 @@ func (s *Server) runChatMessage(sess *session.Session, msg *session.Message) {
 	// Run the coding agent with the user's message.
 	agentStream, err := s.sandbox.Exec(ctx, sess.ContainerID, []string{
 		"bash", "-c",
-		fmt.Sprintf("cd /workspace/repo && opencode -p %q 2>&1", msg.Content),
+		fmt.Sprintf("cd /workspace/repo && opencode -p %q 2>&1", content),
 	})
 	if err != nil {
 		log.Printf("Chat message exec failed: %v", err)
@@ -456,7 +494,10 @@ func (s *Server) CreatePRFromChat(sessionID string) (string, int, error) {
 		return "", 0, fmt.Errorf("session has no container")
 	}
 
-	ctx := context.Background()
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
 	s.emitEvent(sess.ID, "status", "Committing and pushing changes...")
 
@@ -481,7 +522,7 @@ func (s *Server) CreatePRFromChat(sessionID string) (string, int, error) {
 		defaultBranch = "main"
 	}
 
-	prTitle := fmt.Sprintf("opentl: %s", truncate(commitDesc, 72))
+	prTitle := fmt.Sprintf("opentl: %s", session.Truncate(commitDesc, 72))
 	prBody := fmt.Sprintf("## OpenTL Chat Session `%s`\n\n", sess.ID)
 	for _, m := range msgs {
 		if m.Role == "user" {
@@ -512,23 +553,34 @@ func (s *Server) CreatePRFromChat(sessionID string) (string, int, error) {
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req createSessionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	req.Repo = strings.TrimSpace(req.Repo)
+	req.Prompt = strings.TrimSpace(req.Prompt)
 	if req.Repo == "" {
 		writeError(w, http.StatusBadRequest, "repo is required")
+		return
+	}
+	if !isValidRepo(req.Repo) {
+		writeError(w, http.StatusBadRequest, "repo must be in owner/repo format")
+		return
+	}
+	if len([]rune(req.Prompt)) > 10000 {
+		writeError(w, http.StatusBadRequest, "prompt exceeds 10000 characters")
 		return
 	}
 
 	mode := req.Mode
 	if mode == "" {
-		mode = "task"
+		mode = string(session.ModeTask)
 	}
 
 	switch mode {
-	case "chat":
+	case string(session.ModeChat):
 		sess, err := s.CreateChatSession(req.Repo)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to create chat session")
@@ -541,7 +593,7 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 			Mode:   "chat",
 		})
 
-	case "task":
+	case string(session.ModeTask):
 		if req.Prompt == "" {
 			writeError(w, http.StatusBadRequest, "prompt is required for task mode")
 			return
@@ -608,7 +660,11 @@ func (s *Server) handleSessionEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Send historical events first.
-	events, _ := s.store.GetEvents(id, 0)
+	events, err := s.store.GetEvents(id, 0)
+	if err != nil {
+		log.Printf("failed to load events for session %s: %v", id, err)
+		events = nil
+	}
 	for _, e := range events {
 		writeSSE(w, e)
 	}
@@ -658,13 +714,19 @@ func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var req sendMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	req.Content = strings.TrimSpace(req.Content)
 	if req.Content == "" {
 		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+	if len([]rune(req.Content)) > 10000 {
+		writeError(w, http.StatusBadRequest, "content exceeds 10000 characters")
 		return
 	}
 
@@ -715,13 +777,21 @@ type sandboxRoundResult struct {
 	lastLine    string
 }
 
-func (s *Server) runSession(sess *session.Session) {
-	ctx := context.Background()
+func (s *Server) runSession(sessionID string) {
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	sess, err := s.store.GetSession(sessionID)
+	if err != nil {
+		log.Printf("session %s not found while starting run: %v", sessionID, err)
+		return
+	}
 
 	// Phase 2: Index the repo for codebase context.
 	var repoContext string
 	s.emitEvent(sess.ID, "status", "Indexing repository...")
-	rc, err := indexer.Index(ctx, s.github.GoGH(), sess.Repo)
+	rc, err := s.github.IndexRepo(ctx, sess.Repo)
 	if err != nil {
 		log.Printf("Repo indexing failed (proceeding without context): %v", err)
 		s.emitEvent(sess.ID, "status", "Repo indexing failed, proceeding without context")
@@ -731,20 +801,20 @@ func (s *Server) runSession(sess *session.Session) {
 	}
 
 	// Phase 2: Decompose the task into sub-tasks (if orchestrator is available).
-	var subTasks []decomposer.SubTask
+	var subTasks []orchestrator.SubTask
 	if s.orchestrator != nil {
 		s.emitEvent(sess.ID, "status", "Analyzing task complexity...")
 		var err error
-		subTasks, err = decomposer.Decompose(ctx, s.orchestrator.LLM(), sess.Prompt, repoContext)
+		subTasks, err = s.orchestrator.Decompose(ctx, sess.Prompt, repoContext)
 		if err != nil {
 			log.Printf("Task decomposition failed (treating as single task): %v", err)
-			subTasks = []decomposer.SubTask{{Title: "Complete task", Description: sess.Prompt}}
+			subTasks = []orchestrator.SubTask{{Title: "Complete task", Description: sess.Prompt}}
 		}
 		if len(subTasks) > 1 {
 			s.emitEvent(sess.ID, "status", fmt.Sprintf("Task decomposed into %d steps", len(subTasks)))
 		}
 	} else {
-		subTasks = []decomposer.SubTask{{Title: "Complete task", Description: sess.Prompt}}
+		subTasks = []orchestrator.SubTask{{Title: "Complete task", Description: sess.Prompt}}
 	}
 
 	// Execute each sub-task through the plan -> sandbox -> review pipeline.
@@ -778,7 +848,7 @@ func (s *Server) runSession(sess *session.Session) {
 		defaultBranch = "main"
 	}
 
-	prTitle := fmt.Sprintf("opentl: %s", truncate(sess.Prompt, 72))
+	prTitle := fmt.Sprintf("opentl: %s", session.Truncate(sess.Prompt, 72))
 	prBody := fmt.Sprintf("## OpenTL Session `%s`\n\n**Prompt:**\n> %s\n\n---\n*Created by [OpenTL](https://github.com/jxucoder/opentl)*",
 		sess.ID, sess.Prompt)
 
@@ -927,20 +997,9 @@ func (s *Server) runSandboxRound(ctx context.Context, sess *session.Session, pro
 	for logStream.Scan() {
 		line := logStream.Text()
 		lastLine = line
-
-		switch {
-		case strings.HasPrefix(line, "###OPENTL_STATUS### "):
-			msg := strings.TrimPrefix(line, "###OPENTL_STATUS### ")
-			s.emitEvent(sess.ID, "status", msg)
-		case strings.HasPrefix(line, "###OPENTL_ERROR### "):
-			msg := strings.TrimPrefix(line, "###OPENTL_ERROR### ")
-			s.emitEvent(sess.ID, "error", msg)
-		case strings.HasPrefix(line, "###OPENTL_DONE### "):
-			branch := strings.TrimPrefix(line, "###OPENTL_DONE### ")
-			sess.Branch = branch
-			s.emitEvent(sess.ID, "status", fmt.Sprintf("Branch pushed: %s", branch))
-		default:
-			s.emitEvent(sess.ID, "output", line)
+		s.dispatchLogLine(sess.ID, line)
+		if strings.HasPrefix(line, "###OPENTL_DONE### ") {
+			sess.Branch = strings.TrimPrefix(line, "###OPENTL_DONE### ")
 		}
 	}
 
@@ -989,12 +1048,28 @@ func (s *Server) emitEvent(sessionID, eventType, data string) {
 	s.bus.Publish(sessionID, event)
 }
 
+func (s *Server) dispatchLogLine(sessionID, line string) {
+	switch {
+	case strings.HasPrefix(line, "###OPENTL_STATUS### "):
+		s.emitEvent(sessionID, "status", strings.TrimPrefix(line, "###OPENTL_STATUS### "))
+	case strings.HasPrefix(line, "###OPENTL_ERROR### "):
+		s.emitEvent(sessionID, "error", strings.TrimPrefix(line, "###OPENTL_ERROR### "))
+	case strings.HasPrefix(line, "###OPENTL_DONE### "):
+		branch := strings.TrimPrefix(line, "###OPENTL_DONE### ")
+		s.emitEvent(sessionID, "status", fmt.Sprintf("Branch pushed: %s", branch))
+	default:
+		s.emitEvent(sessionID, "output", line)
+	}
+}
+
 // --- Helpers ---
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("writeJSON encode error: %v", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
@@ -1002,13 +1077,17 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func writeSSE(w http.ResponseWriter, event *session.Event) {
-	data, _ := json.Marshal(event)
-	fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.ID, event.Type, string(data))
+	data, err := json.Marshal(event)
+	if err != nil {
+		log.Printf("writeSSE marshal error: %v", err)
+		return
+	}
+	if _, err := fmt.Fprintf(w, "id: %d\nevent: %s\ndata: %s\n\n", event.ID, event.Type, string(data)); err != nil {
+		log.Printf("writeSSE write error: %v", err)
+	}
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
+func isValidRepo(repo string) bool {
+	parts := strings.Split(repo, "/")
+	return len(parts) == 2 && parts[0] != "" && parts[1] != ""
 }

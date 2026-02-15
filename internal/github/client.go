@@ -21,12 +21,6 @@ func NewClient(token string) *Client {
 	}
 }
 
-// GoGH returns the underlying go-github client for use by other packages
-// (e.g. the repo indexer) that need direct API access.
-func (c *Client) GoGH() *gogh.Client {
-	return c.gh
-}
-
 // PROptions configures a new pull request.
 type PROptions struct {
 	Repo   string // "owner/repo"

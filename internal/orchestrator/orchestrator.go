@@ -1,9 +1,9 @@
 // Package orchestrator implements the plan-then-code-then-review pipeline.
 //
 // Instead of sending raw prompts directly to the sandbox agent, the orchestrator:
-//   1. PLAN  - Analyzes the task and generates a structured plan
-//   2. CODE  - Sends the enriched plan to the sandbox agent (OpenCode)
-//   3. REVIEW - Reviews the resulting diff and optionally requests one revision
+//  1. PLAN  - Analyzes the task and generates a structured plan
+//  2. CODE  - Sends the enriched plan to the sandbox agent (OpenCode)
+//  3. REVIEW - Reviews the resulting diff and optionally requests one revision
 //
 // This is not a multi-agent framework -- it's three sequential LLM calls
 // that wrap the sandbox execution with intelligence.
@@ -11,6 +11,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -30,12 +31,6 @@ type Orchestrator struct {
 // New creates an Orchestrator with the given LLM client.
 func New(llm LLMClient) *Orchestrator {
 	return &Orchestrator{llm: llm}
-}
-
-// LLM returns the underlying LLM client for use by other packages (e.g. the
-// task decomposer) that need to make LLM calls.
-func (o *Orchestrator) LLM() LLMClient {
-	return o.llm
 }
 
 // Plan generates a structured plan for a task.
@@ -123,6 +118,69 @@ func (o *Orchestrator) Review(ctx context.Context, prompt, plan, diff string) (*
 	}, nil
 }
 
+// SubTask is a single step in a decomposed task.
+type SubTask struct {
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+// Decompose uses the LLM to break a task into ordered sub-tasks.
+// If the task is simple, returns a single SubTask wrapping the original prompt.
+func (o *Orchestrator) Decompose(ctx context.Context, prompt, repoContext string) ([]SubTask, error) {
+	user := fmt.Sprintf("Task: %s", prompt)
+	if repoContext != "" {
+		user = fmt.Sprintf("## Codebase Context\n%s\n\nTask: %s", repoContext, prompt)
+	}
+
+	response, err := o.llm.Complete(ctx, decomposerSystemPrompt, user)
+	if err != nil {
+		return nil, fmt.Errorf("decomposing task: %w", err)
+	}
+
+	tasks, err := parseSubTasks(response)
+	if err != nil || len(tasks) == 0 {
+		return []SubTask{{Title: "Complete task", Description: prompt}}, nil
+	}
+	return tasks, nil
+}
+
+// parseSubTasks extracts the JSON array from the LLM response.
+// The response may contain markdown fences or extra text around the JSON.
+func parseSubTasks(response string) ([]SubTask, error) {
+	jsonStr := extractJSON(response)
+	if jsonStr == "" {
+		return nil, fmt.Errorf("no JSON array found in response")
+	}
+
+	var tasks []SubTask
+	if err := json.Unmarshal([]byte(jsonStr), &tasks); err != nil {
+		return nil, fmt.Errorf("parsing sub-tasks JSON: %w", err)
+	}
+	return tasks, nil
+}
+
+// extractJSON finds the first JSON array in the text, handling optional
+// markdown code fences.
+func extractJSON(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "```") {
+		if idx := strings.Index(s, "\n"); idx >= 0 {
+			s = s[idx+1:]
+		}
+		if idx := strings.LastIndex(s, "```"); idx >= 0 {
+			s = s[:idx]
+		}
+		s = strings.TrimSpace(s)
+	}
+
+	start := strings.Index(s, "[")
+	end := strings.LastIndex(s, "]")
+	if start < 0 || end < 0 || end <= start {
+		return ""
+	}
+	return s[start : end+1]
+}
+
 // --- System Prompts ---
 
 const plannerSystemPrompt = `You are a senior software engineer planning a code change.
@@ -160,3 +218,27 @@ Respond with one of:
 - "REVISION NEEDED" followed by specific, actionable feedback
 
 Keep your response concise and focused on the most important issues.`
+
+const decomposerSystemPrompt = `You are a task decomposition engine for a coding agent.
+
+Given a task description (and optionally codebase context), decide whether the
+task should be executed as a single step or broken into multiple ordered steps.
+
+Rules:
+- For simple, focused tasks (e.g. "fix the typo in README", "add a unit test
+  for function X"), return a SINGLE sub-task.
+- For complex, multi-concern tasks (e.g. "add user authentication with login,
+  signup, and password reset"), break into 2-5 ordered steps.
+- Each step should be independently executable and testable.
+- Steps are executed sequentially on the same git branch -- later steps can
+  depend on earlier steps' changes.
+- Keep step descriptions specific and actionable.
+
+Return ONLY a JSON array (no other text) in this exact format:
+
+[
+  {"title": "Short title", "description": "Detailed description of what to do"},
+  {"title": "Short title", "description": "Detailed description of what to do"}
+]
+
+For a simple task, return a single-element array.`

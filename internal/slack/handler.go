@@ -134,15 +134,7 @@ func (b *Bot) handleMention(ev *slackevents.AppMentionEvent) {
 		return
 	}
 
-	// Extract --repo flag from prompt if present.
-	repo := b.defaultRepo
-	if idx := strings.Index(prompt, "--repo "); idx >= 0 {
-		parts := strings.Fields(prompt[idx+7:])
-		if len(parts) > 0 {
-			repo = parts[0]
-			prompt = strings.TrimSpace(prompt[:idx])
-		}
-	}
+	prompt, repo := session.ParseRepoFlag(prompt, b.defaultRepo)
 
 	if repo == "" {
 		b.postThread(ev.Channel, threadTS,
@@ -201,8 +193,8 @@ func (b *Bot) monitorSession(sess *session.Session, channel, threadTS string) {
 			b.postPRMessage(channel, threadTS, updated)
 			return
 
-		// Skip "output" events to avoid flooding the thread.
-		// They are captured in the uploaded log file.
+			// Skip "output" events to avoid flooding the thread.
+			// They are captured in the uploaded log file.
 		}
 	}
 }
@@ -237,11 +229,11 @@ func (b *Bot) uploadSessionLog(channel, threadTS, sessionID string) {
 	filename := fmt.Sprintf("opentl-session-%s.log", sessionID)
 
 	_, err = b.api.UploadFileV2(slack.UploadFileV2Parameters{
-		Content:        content,
-		Filename:       filename,
-		FileSize:       len(content),
-		Title:          fmt.Sprintf("Terminal Output - Session %s", sessionID),
-		Channel:        channel,
+		Content:         content,
+		Filename:        filename,
+		FileSize:        len(content),
+		Title:           fmt.Sprintf("Terminal Output - Session %s", sessionID),
+		Channel:         channel,
 		ThreadTimestamp: threadTS,
 	})
 	if err != nil {
@@ -266,7 +258,7 @@ func (b *Bot) postPRMessage(channel, threadTS string, sess *session.Session) {
 	// Build a rich Block Kit message.
 	headerText := slack.NewTextBlockObject(slack.MarkdownType,
 		fmt.Sprintf(":white_check_mark: *PR Ready!*\n<%s|%s>",
-			sess.PRUrl, fmt.Sprintf("PR #%d: %s", sess.PRNumber, truncate(sess.Prompt, 60))),
+			sess.PRUrl, fmt.Sprintf("PR #%d: %s", sess.PRNumber, session.Truncate(sess.Prompt, 60))),
 		false, false)
 	headerSection := slack.NewSectionBlock(headerText, nil, nil)
 
@@ -298,12 +290,4 @@ func (b *Bot) postThread(channel, threadTS, text string) {
 	if err != nil {
 		log.Printf("Slack: failed to post message to %s: %v", channel, err)
 	}
-}
-
-// truncate shortens a string to maxLen, adding "..." if truncated.
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }

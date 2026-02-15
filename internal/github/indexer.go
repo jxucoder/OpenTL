@@ -1,9 +1,4 @@
-// Package indexer provides repo-aware context indexing for the orchestrator.
-//
-// Before the planner generates a plan, the indexer fetches the repository
-// structure (file tree, key config files, language breakdown) via the GitHub
-// API so the LLM has real codebase context instead of just a repo name.
-package indexer
+package github
 
 import (
 	"context"
@@ -14,26 +9,21 @@ import (
 	gogh "github.com/google/go-github/v68/github"
 )
 
-// keyFileNames are config / entry-point files whose content is included
-// (first ~100 lines) so the planner understands the project setup.
 var keyFileNames = map[string]bool{
-	"README.md":       true,
-	"package.json":    true,
-	"go.mod":          true,
-	"pyproject.toml":  true,
-	"Cargo.toml":      true,
-	"Makefile":        true,
-	"Dockerfile":      true,
+	"README.md":          true,
+	"package.json":       true,
+	"go.mod":             true,
+	"pyproject.toml":     true,
+	"Cargo.toml":         true,
+	"Makefile":           true,
+	"Dockerfile":         true,
 	"docker-compose.yml": true,
-	"compose.yml":     true,
-	"requirements.txt": true,
-	"tsconfig.json":   true,
+	"compose.yml":        true,
+	"requirements.txt":   true,
+	"tsconfig.json":      true,
 }
 
-// maxTreeDepth limits the indented tree to the top N directory levels.
 const maxTreeDepth = 3
-
-// maxKeyFileLines caps how many lines of each key file are included.
 const maxKeyFileLines = 100
 
 // RepoContext holds the structural summary of a repository.
@@ -55,7 +45,6 @@ func (rc *RepoContext) String() string {
 
 	if len(rc.Languages) > 0 {
 		fmt.Fprintf(&b, "### Languages\n")
-		// Sort by percentage descending.
 		type langPct struct {
 			name string
 			pct  int
@@ -85,10 +74,9 @@ func (rc *RepoContext) String() string {
 	return b.String()
 }
 
-// Index fetches repository metadata, file tree, and key files from the GitHub
-// API and returns a structured RepoContext. The repo parameter should be in
-// "owner/repo" format.
-func Index(ctx context.Context, gh *gogh.Client, repo string) (*RepoContext, error) {
+// IndexRepo fetches repository metadata, file tree, and key files from the
+// GitHub API and returns a structured RepoContext.
+func (c *Client) IndexRepo(ctx context.Context, repo string) (*RepoContext, error) {
 	owner, repoName, err := splitRepo(repo)
 	if err != nil {
 		return nil, err
@@ -99,8 +87,7 @@ func Index(ctx context.Context, gh *gogh.Client, repo string) (*RepoContext, err
 		KeyFiles:  make(map[string]string),
 	}
 
-	// 1. Get repo metadata (description, default branch).
-	repoInfo, _, err := gh.Repositories.Get(ctx, owner, repoName)
+	repoInfo, _, err := c.gh.Repositories.Get(ctx, owner, repoName)
 	if err != nil {
 		return nil, fmt.Errorf("fetching repo info: %w", err)
 	}
@@ -110,8 +97,7 @@ func Index(ctx context.Context, gh *gogh.Client, repo string) (*RepoContext, err
 		defaultBranch = "main"
 	}
 
-	// 2. Get languages.
-	languages, _, err := gh.Repositories.ListLanguages(ctx, owner, repoName)
+	languages, _, err := c.gh.Repositories.ListLanguages(ctx, owner, repoName)
 	if err == nil && len(languages) > 0 {
 		var total int
 		for _, bytes := range languages {
@@ -124,24 +110,21 @@ func Index(ctx context.Context, gh *gogh.Client, repo string) (*RepoContext, err
 		}
 	}
 
-	// 3. Get the recursive file tree.
-	tree, _, err := gh.Git.GetTree(ctx, owner, repoName, defaultBranch, true)
+	tree, _, err := c.gh.Git.GetTree(ctx, owner, repoName, defaultBranch, true)
 	if err != nil {
 		return nil, fmt.Errorf("fetching file tree: %w", err)
 	}
 
 	rc.Tree = buildTreeString(tree.Entries)
 
-	// 4. Fetch key files content.
 	for _, entry := range tree.Entries {
 		path := entry.GetPath()
 		baseName := path
 		if idx := strings.LastIndex(path, "/"); idx >= 0 {
 			baseName = path[idx+1:]
 		}
-		// Only fetch top-level key files (no slash in path).
 		if !strings.Contains(path, "/") && keyFileNames[baseName] {
-			content, err := fetchFileContent(ctx, gh, owner, repoName, path, defaultBranch)
+			content, err := fetchFileContent(ctx, c.gh, owner, repoName, path, defaultBranch)
 			if err == nil && content != "" {
 				rc.KeyFiles[path] = content
 			}
@@ -151,8 +134,6 @@ func Index(ctx context.Context, gh *gogh.Client, repo string) (*RepoContext, err
 	return rc, nil
 }
 
-// buildTreeString formats tree entries as an indented file listing,
-// limited to maxTreeDepth levels.
 func buildTreeString(entries []*gogh.TreeEntry) string {
 	var lines []string
 	for _, e := range entries {
@@ -177,8 +158,6 @@ func buildTreeString(entries []*gogh.TreeEntry) string {
 	return strings.Join(lines, "\n")
 }
 
-// fetchFileContent retrieves a file's content from GitHub, truncated to
-// maxKeyFileLines. Returns the content as a string.
 func fetchFileContent(ctx context.Context, gh *gogh.Client, owner, repo, path, ref string) (string, error) {
 	opts := &gogh.RepositoryContentGetOptions{Ref: ref}
 	file, _, _, err := gh.Repositories.GetContents(ctx, owner, repo, path, opts)
@@ -189,7 +168,6 @@ func fetchFileContent(ctx context.Context, gh *gogh.Client, owner, repo, path, r
 		return "", nil
 	}
 
-	// GetContent handles base64 decoding internally.
 	content, err := file.GetContent()
 	if err != nil {
 		return "", fmt.Errorf("decoding content for %s: %w", path, err)
@@ -198,7 +176,6 @@ func fetchFileContent(ctx context.Context, gh *gogh.Client, owner, repo, path, r
 	return truncateLines(content, maxKeyFileLines), nil
 }
 
-// truncateLines keeps only the first n lines of s.
 func truncateLines(s string, n int) string {
 	lines := strings.SplitN(s, "\n", n+1)
 	if len(lines) > n {
@@ -206,13 +183,4 @@ func truncateLines(s string, n int) string {
 		lines = append(lines, "... (truncated)")
 	}
 	return strings.Join(lines, "\n")
-}
-
-// splitRepo parses "owner/repo" into its components.
-func splitRepo(fullName string) (string, string, error) {
-	parts := strings.SplitN(fullName, "/", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("invalid repo format %q, expected \"owner/repo\"", fullName)
-	}
-	return parts[0], parts[1], nil
 }

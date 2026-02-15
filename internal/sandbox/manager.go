@@ -13,13 +13,14 @@ import (
 
 // StartOptions configures a new sandbox container.
 type StartOptions struct {
-	SessionID string
-	Repo      string   // "owner/repo"
-	Prompt    string
-	Branch    string   // git branch name
-	Image     string   // Docker image name
-	Env       []string // additional environment variables
-	Network   string   // Docker network name
+	SessionID  string
+	Repo       string // "owner/repo"
+	Prompt     string
+	Persistent bool
+	Branch     string   // git branch name
+	Image      string   // Docker image name
+	Env        []string // additional environment variables
+	Network    string   // Docker network name
 }
 
 // Manager handles Docker sandbox lifecycle.
@@ -49,7 +50,7 @@ func findDocker() string {
 	candidates := []string{
 		"/Applications/Docker.app/Contents/Resources/bin/docker", // Docker Desktop (macOS)
 		"/usr/local/bin/docker",                                  // Homebrew / manual install
-		"/opt/homebrew/bin/docker",                                // Homebrew on Apple Silicon
+		"/opt/homebrew/bin/docker",                               // Homebrew on Apple Silicon
 	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
@@ -80,18 +81,21 @@ func (m *Manager) Start(ctx context.Context, opts StartOptions) (string, error) 
 	}
 
 	// Environment variables
-	envVars := append(opts.Env,
-		"OPENTL_SESSION_ID="+opts.SessionID,
-		"OPENTL_REPO="+opts.Repo,
-		"OPENTL_PROMPT="+opts.Prompt,
-		"OPENTL_BRANCH="+opts.Branch,
-	)
+	envVars := make([]string, 0, len(opts.Env)+4)
+	envVars = append(envVars, opts.Env...)
+	envVars = append(envVars, "OPENTL_SESSION_ID="+opts.SessionID, "OPENTL_REPO="+opts.Repo, "OPENTL_BRANCH="+opts.Branch)
+	if !opts.Persistent {
+		envVars = append(envVars, "OPENTL_PROMPT="+opts.Prompt)
+	}
 	for _, e := range envVars {
 		args = append(args, "-e", e)
 	}
 
-	// Image
-	args = append(args, opts.Image)
+	if opts.Persistent {
+		args = append(args, "--entrypoint", "sleep", opts.Image, "infinity")
+	} else {
+		args = append(args, opts.Image)
+	}
 
 	cmd := m.docker(ctx, args...)
 	output, err := cmd.CombinedOutput()
@@ -172,44 +176,6 @@ func (m *Manager) EnsureNetwork(ctx context.Context, name string) error {
 		return fmt.Errorf("creating network %q: %w\noutput: %s", name, err, string(output))
 	}
 	return nil
-}
-
-// --- Persistent container support for chat sessions ---
-
-// StartPersistent creates a long-lived container that stays alive between
-// messages. The container runs "sleep infinity" instead of the entrypoint.
-// Use Exec() to run commands inside it.
-func (m *Manager) StartPersistent(ctx context.Context, opts StartOptions) (string, error) {
-	args := []string{
-		"run", "-d",
-		"--name", fmt.Sprintf("opentl-%s", opts.SessionID),
-		"--label", "opentl.session=" + opts.SessionID,
-	}
-
-	if opts.Network != "" {
-		args = append(args, "--network", opts.Network)
-	}
-
-	envVars := append(opts.Env,
-		"OPENTL_SESSION_ID="+opts.SessionID,
-		"OPENTL_REPO="+opts.Repo,
-		"OPENTL_BRANCH="+opts.Branch,
-	)
-	for _, e := range envVars {
-		args = append(args, "-e", e)
-	}
-
-	// Override entrypoint to keep the container alive.
-	args = append(args, "--entrypoint", "sleep")
-	args = append(args, opts.Image, "infinity")
-
-	cmd := m.docker(ctx, args...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("starting persistent container: %w\noutput: %s", err, string(output))
-	}
-
-	return strings.TrimSpace(string(output)), nil
 }
 
 // Exec runs a command inside a running container and returns a streaming
