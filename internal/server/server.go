@@ -179,6 +179,9 @@ func (s *Server) buildRouter() chi.Router {
 		r.Get("/sessions/{id}/events", s.handleSessionEvents)
 	})
 
+	// GitHub webhook endpoint (no timeout — receives large payloads).
+	r.Post("/api/webhooks/github", s.handleGitHubWebhook)
+
 	// Health check.
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("ok"))
@@ -1059,6 +1062,190 @@ func (s *Server) dispatchLogLine(sessionID, line string) {
 		s.emitEvent(sessionID, "status", fmt.Sprintf("Branch pushed: %s", branch))
 	default:
 		s.emitEvent(sessionID, "output", line)
+	}
+}
+
+// --- GitHub Webhook ---
+
+// handleGitHubWebhook processes incoming GitHub webhook events for PR comments.
+func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MB limit
+
+	event, err := github.ParseWebhook(r, s.config.GitHubWebhookSecret)
+	if err != nil {
+		log.Printf("Webhook parse error: %v", err)
+		writeError(w, http.StatusBadRequest, "invalid webhook")
+		return
+	}
+
+	// Not a PR comment event we handle.
+	if event == nil {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+		return
+	}
+
+	// Ignore comments from the OpenTL bot itself to avoid loops.
+	if event.CommentUser == "opentl[bot]" || event.CommentUser == "OpenTL" {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+		return
+	}
+
+	// Look up the original session for this PR.
+	originalSess, err := s.store.GetSessionByPR(event.Repo, event.PRNumber)
+	if err != nil {
+		log.Printf("Webhook: no session found for PR #%d on %s: %v", event.PRNumber, event.Repo, err)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+		return
+	}
+
+	log.Printf("Webhook: received PR comment on %s#%d from @%s, original session %s",
+		event.Repo, event.PRNumber, event.CommentUser, originalSess.ID)
+
+	// Spin up a new session to address the comment.
+	sess, err := s.createPRCommentSession(originalSess, event)
+	if err != nil {
+		log.Printf("Webhook: failed to create PR comment session: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to process comment")
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, createSessionResponse{
+		ID:     sess.ID,
+		Branch: sess.Branch,
+		Mode:   "task",
+	})
+}
+
+// createPRCommentSession creates a new task session that addresses a PR comment.
+// The new session reuses the original session's branch so that pushes update
+// the existing PR automatically.
+func (s *Server) createPRCommentSession(original *session.Session, event *github.WebhookEvent) (*session.Session, error) {
+	id := uuid.New().String()[:8]
+	now := time.Now().UTC()
+
+	// Build a prompt that gives the agent context about the PR comment.
+	prompt := fmt.Sprintf(`A reviewer left the following comment on Pull Request #%d in repository %s.
+
+## Reviewer Comment (by @%s)
+%s
+
+## Instructions
+- Address the reviewer's feedback by making the necessary code changes
+- The changes should be committed to the existing PR branch
+- Keep changes minimal and focused on the feedback
+- Run tests after making changes if a test suite exists
+- Do not make unrelated changes`,
+		event.PRNumber, event.Repo, event.CommentUser, event.CommentBody)
+
+	sess := &session.Session{
+		ID:        id,
+		Repo:      event.Repo,
+		Prompt:    prompt,
+		Mode:      session.ModeTask,
+		Status:    session.StatusPending,
+		Branch:    original.Branch,
+		PRUrl:     original.PRUrl,
+		PRNumber:  original.PRNumber,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := s.store.CreateSession(sess); err != nil {
+		return nil, fmt.Errorf("creating session: %w", err)
+	}
+
+	// Run the PR comment session in the background.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.runPRCommentSession(sess.ID, event)
+	}()
+
+	return sess, nil
+}
+
+// runPRCommentSession executes the agent to address a PR comment. Unlike
+// runSession, this reuses the existing PR branch and does not create a new PR.
+// After the agent finishes, it posts a reply comment on the PR.
+func (s *Server) runPRCommentSession(sessionID string, event *github.WebhookEvent) {
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	sess, err := s.store.GetSession(sessionID)
+	if err != nil {
+		log.Printf("PR comment session %s not found: %v", sessionID, err)
+		return
+	}
+
+	// Post an acknowledgment comment on the PR.
+	ackMsg := fmt.Sprintf("🤖 OpenTL is addressing this comment (session `%s`)...", sess.ID)
+	if err := s.github.ReplyToPRComment(ctx, sess.Repo, sess.PRNumber, ackMsg); err != nil {
+		log.Printf("Failed to post ack comment: %v", err)
+	}
+
+	// Index the repo for context.
+	var repoContext string
+	s.emitEvent(sess.ID, "status", "Indexing repository...")
+	rc, indexErr := s.github.IndexRepo(ctx, sess.Repo)
+	if indexErr != nil {
+		log.Printf("Repo indexing failed (proceeding without context): %v", indexErr)
+	} else {
+		repoContext = rc.String()
+	}
+
+	// Run through the plan/sandbox/review pipeline (same as a normal task,
+	// but using the existing branch so changes push to the existing PR).
+	prompt := sess.Prompt
+	if s.orchestrator != nil {
+		s.emitEvent(sess.ID, "status", "Planning changes for PR comment...")
+		plan, err := s.orchestrator.Plan(ctx, sess.Repo, prompt, repoContext)
+		if err != nil {
+			log.Printf("Planning failed for PR comment session: %v", err)
+		} else {
+			prompt = s.orchestrator.EnrichPrompt(sess.Prompt, plan)
+		}
+	}
+
+	result, err := s.runSandboxRound(ctx, sess, prompt)
+	if err != nil {
+		s.failSession(sess, fmt.Sprintf("PR comment session failed: %v", err))
+		replyMsg := fmt.Sprintf("❌ OpenTL failed to address this comment (session `%s`): %v", sess.ID, err)
+		s.github.ReplyToPRComment(ctx, sess.Repo, sess.PRNumber, replyMsg)
+		return
+	}
+
+	// Clean up the container.
+	defer func() {
+		if result.containerID != "" {
+			s.sandbox.Stop(ctx, result.containerID)
+		}
+	}()
+
+	if result.exitCode != 0 {
+		errMsg := fmt.Sprintf("sandbox exited with code %d", result.exitCode)
+		if result.lastLine != "" {
+			errMsg += ": " + result.lastLine
+		}
+		s.failSession(sess, errMsg)
+		replyMsg := fmt.Sprintf("❌ OpenTL encountered an error while addressing this comment (session `%s`): %s", sess.ID, errMsg)
+		s.github.ReplyToPRComment(ctx, sess.Repo, sess.PRNumber, replyMsg)
+		return
+	}
+
+	// Mark session as complete.
+	sess.Status = session.StatusComplete
+	s.store.UpdateSession(sess)
+	s.emitEvent(sess.ID, "done", sess.PRUrl)
+
+	// Post a completion comment on the PR.
+	replyMsg := fmt.Sprintf("✅ OpenTL has pushed changes to address this comment (session `%s`). Please review the updated code.", sess.ID)
+	if err := s.github.ReplyToPRComment(ctx, sess.Repo, sess.PRNumber, replyMsg); err != nil {
+		log.Printf("Failed to post completion comment: %v", err)
 	}
 }
 

@@ -49,6 +49,11 @@ type Config struct {
 	// TelegramDefaultRepo is the fallback repository when --repo is not specified.
 	TelegramDefaultRepo string
 
+	// GitHubWebhookSecret is the shared secret for verifying GitHub webhook
+	// payloads. When set, incoming webhooks are verified via HMAC-SHA256.
+	// Leave empty to skip signature verification (not recommended for production).
+	GitHubWebhookSecret string
+
 	// MaxRevisions is the maximum number of review-revision rounds before
 	// proceeding to PR creation. 0 means no revisions (review only). Default: 1.
 	MaxRevisions int
@@ -88,6 +93,7 @@ func Load() (*Config, error) {
 		SlackDefaultRepo:    os.Getenv("SLACK_DEFAULT_REPO"),
 		TelegramBotToken:    os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramDefaultRepo: os.Getenv("TELEGRAM_DEFAULT_REPO"),
+		GitHubWebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		MaxRevisions:        envOrInt("OPENTL_MAX_REVISIONS", 1),
 		ChatIdleTimeout:     envOrDuration("OPENTL_CHAT_IDLE_TIMEOUT", 30*time.Minute),
 		ChatMaxMessages:     envOrInt("OPENTL_CHAT_MAX_MESSAGES", 50),
@@ -143,6 +149,11 @@ func (c *Config) SlackEnabled() bool {
 // TelegramEnabled returns true if the Telegram bot is configured.
 func (c *Config) TelegramEnabled() bool {
 	return c.TelegramBotToken != ""
+}
+
+// WebhookEnabled returns true if the GitHub webhook secret is configured.
+func (c *Config) WebhookEnabled() bool {
+	return c.GitHubWebhookSecret != ""
 }
 
 // SandboxEnv returns environment variables to pass to sandbox containers.
