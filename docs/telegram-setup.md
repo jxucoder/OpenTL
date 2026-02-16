@@ -42,25 +42,72 @@ Telegram bot enabled (long polling)
 Telegram bot listening for messages...
 ```
 
-## Use
+## Usage
 
-Open Telegram on your phone, find your bot, and send a message:
+The Telegram bot supports two modes: **chat mode** (multi-turn, persistent sandbox) and **task mode** (one-shot, fire-and-forget).
+
+### Chat Mode (default)
+
+Send a message with a repo and the bot starts a persistent sandbox session. You can then send follow-up messages in the same session.
 
 ```
 fix the broken login redirect --repo owner/repo
 ```
 
-Or if you set `TELEGRAM_DEFAULT_REPO`:
+Or start explicitly:
 
 ```
-add rate limiting to the users API
+/new --repo owner/repo
 ```
 
-The bot will:
-1. Acknowledge the task
-2. Send status updates as replies
-3. Upload the full terminal output as a `.log` file
-4. Send the PR link when done
+Then send follow-up messages naturally:
+
+```
+also add tests for the fix
+```
+
+```
+now update the error messages to be more descriptive
+```
+
+When you're happy with the changes:
+
+```
+/pr
+```
+
+The bot creates a PR from all the accumulated changes.
+
+### Task Mode (one-shot)
+
+For fire-and-forget tasks that don't need follow-ups:
+
+```
+/run fix the typo in README.md --repo owner/repo
+```
+
+The bot acknowledges, runs the task, and posts the PR link (or text answer) when done.
+
+### Commands
+
+| Command | Description |
+|:--------|:------------|
+| `/new --repo owner/repo` | Start a fresh chat session |
+| `/run <task> --repo owner/repo` | One-shot task mode |
+| `/pr` | Create a PR from current session changes |
+| `/diff` | Show recent agent output |
+| `/status` | Show session info |
+| `/stop` | Stop the current session |
+| `/help` | Show help message |
+
+If `TELEGRAM_DEFAULT_REPO` is set, you can omit `--repo` from all commands.
+
+### What the Bot Does
+
+1. Acknowledges the task with a status message
+2. Sends status updates as replies (planning, sandbox started, agent running, etc.)
+3. Sends agent output in code blocks
+4. Posts the PR link when done, or displays the text answer
 
 ## That's It
 

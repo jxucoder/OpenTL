@@ -19,6 +19,7 @@ set -euo pipefail
 emit_status() { echo "###TELECODER_STATUS### $1"; }
 emit_error()  { echo "###TELECODER_ERROR### $1"; }
 emit_done()   { echo "###TELECODER_DONE### $1"; }
+emit_result() { echo "###TELECODER_RESULT### $1"; }
 
 # --- Validate required environment ---
 : "${TELECODER_REPO:?TELECODER_REPO is required}"
@@ -156,15 +157,20 @@ esac
 
 emit_status "Agent finished"
 
-# --- Commit changes ---
-emit_status "Committing changes..."
+# --- Check for code changes and decide output type ---
+emit_status "Checking for code changes..."
 
 git add -A
 
 if git diff --cached --quiet; then
-    emit_error "No changes were made by the agent"
-    exit 1
+    # No code changes — the agent's stdout is the answer.
+    emit_status "No code changes detected, returning text result"
+    emit_result '{"type":"text"}'
+    exit 0
 fi
+
+# --- Commit changes ---
+emit_status "Committing changes..."
 
 # Create a meaningful commit message.
 COMMIT_MSG="telecoder: ${TELECODER_PROMPT}"

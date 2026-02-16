@@ -86,6 +86,10 @@ func migrate(db *sql.DB) error {
 	// Add agent column to existing databases (idempotent).
 	_, _ = db.Exec(`ALTER TABLE sessions ADD COLUMN agent TEXT NOT NULL DEFAULT ''`)
 
+	// Add result columns to existing databases (idempotent).
+	_, _ = db.Exec(`ALTER TABLE sessions ADD COLUMN result_type TEXT NOT NULL DEFAULT ''`)
+	_, _ = db.Exec(`ALTER TABLE sessions ADD COLUMN result_content TEXT NOT NULL DEFAULT ''`)
+
 	return nil
 }
 
@@ -112,7 +116,7 @@ func (s *Store) CreateSession(sess *model.Session) error {
 func (s *Store) GetSession(id string) (*model.Session, error) {
 	row := s.db.QueryRow(
 		`SELECT id, repo, prompt, mode, status, branch, agent, pr_url, pr_number,
-		        container_id, error, created_at, updated_at
+		        container_id, error, result_type, result_content, created_at, updated_at
 		 FROM sessions WHERE id = ?`, id,
 	)
 	return scanSession(row)
@@ -122,7 +126,7 @@ func (s *Store) GetSession(id string) (*model.Session, error) {
 func (s *Store) ListSessions() ([]*model.Session, error) {
 	rows, err := s.db.Query(
 		`SELECT id, repo, prompt, mode, status, branch, agent, pr_url, pr_number,
-		        container_id, error, created_at, updated_at
+		        container_id, error, result_type, result_content, created_at, updated_at
 		 FROM sessions ORDER BY created_at DESC`,
 	)
 	if err != nil {
@@ -147,10 +151,12 @@ func (s *Store) UpdateSession(sess *model.Session) error {
 	_, err := s.db.Exec(
 		`UPDATE sessions SET
 			status = ?, branch = ?, agent = ?, pr_url = ?, pr_number = ?,
-			container_id = ?, error = ?, updated_at = ?
+			container_id = ?, error = ?, result_type = ?, result_content = ?,
+			updated_at = ?
 		 WHERE id = ?`,
 		sess.Status, sess.Branch, sess.Agent, sess.PRUrl, sess.PRNumber,
-		sess.ContainerID, sess.Error, sess.UpdatedAt, sess.ID,
+		sess.ContainerID, sess.Error, string(sess.Result.Type), sess.Result.Content,
+		sess.UpdatedAt, sess.ID,
 	)
 	return err
 }
@@ -202,7 +208,7 @@ func (s *Store) GetEvents(sessionID string, afterID int64) ([]*model.Event, erro
 func (s *Store) GetSessionByPR(repo string, prNumber int) (*model.Session, error) {
 	row := s.db.QueryRow(
 		`SELECT id, repo, prompt, mode, status, branch, agent, pr_url, pr_number,
-		        container_id, error, created_at, updated_at
+		        container_id, error, result_type, result_content, created_at, updated_at
 		 FROM sessions
 		 WHERE repo = ? AND pr_number = ?
 		 ORDER BY created_at DESC
@@ -264,13 +270,25 @@ type scannable interface {
 
 func scanSession(row scannable) (*model.Session, error) {
 	sess := &model.Session{}
+	var resultType, resultContent string
 	err := row.Scan(
 		&sess.ID, &sess.Repo, &sess.Prompt, &sess.Mode, &sess.Status,
 		&sess.Branch, &sess.Agent, &sess.PRUrl, &sess.PRNumber,
-		&sess.ContainerID, &sess.Error, &sess.CreatedAt, &sess.UpdatedAt,
+		&sess.ContainerID, &sess.Error, &resultType, &resultContent,
+		&sess.CreatedAt, &sess.UpdatedAt,
 	)
 	if err != nil {
 		return nil, err
+	}
+	sess.Result.Type = model.ResultType(resultType)
+	sess.Result.Content = resultContent
+	// Backfill Result PR fields from legacy top-level fields for consistency.
+	if sess.PRUrl != "" {
+		sess.Result.PRUrl = sess.PRUrl
+		sess.Result.PRNumber = sess.PRNumber
+		if sess.Result.Type == model.ResultNone {
+			sess.Result.Type = model.ResultPR
+		}
 	}
 	return sess, nil
 }

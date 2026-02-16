@@ -1,6 +1,6 @@
 # User Stories
 
-Real-world scenarios that TeleCoder can power — today or with targeted extensions.
+Real-world scenarios that TeleCoder can power, with concrete examples.
 
 ---
 
@@ -10,18 +10,50 @@ Real-world scenarios that TeleCoder can power — today or with targeted extensi
 
 **Story:** An engineer types a task in Slack and walks away. Ten minutes later a PR appears with the changes, tests passing, ready for review.
 
-This is the core flow. No changes needed.
+This is the core flow. No extensions needed.
+
+**Example: CLI**
+
+```bash
+telecoder run "add rate limiting to /api/users -- max 100 requests per minute per API key, return 429 with Retry-After header" --repo myorg/backend
+```
+
+**Example: Slack**
 
 ```
-telecoder run "add rate limiting to /api/users" --repo myorg/backend
+@TeleCoder add input validation to the POST /api/orders endpoint. Validate that quantity is a positive integer and product_id exists. Return 400 with field-level errors. --repo myorg/backend
 ```
 
-- Task arrives via CLI, Slack, or Telegram.
+**Example: Telegram**
+
+```
+refactor the database connection pool to use pgxpool instead of database/sql. Update all repository files. --repo myorg/backend
+```
+
+**Example: Linear**
+
+> **Issue title:** Add pagination to GET /api/products
+>
+> **Description:** Currently returns all products. Add cursor-based pagination with `limit` and `after` parameters. Default limit 20, max 100. --repo myorg/backend
+>
+> **Labels:** `telecoder`
+
+**Example: Jira**
+
+> **BACK-789:** Migrate user avatars from local storage to S3
+>
+> **Description:** Move avatar upload/download to use AWS S3. Use the existing AWS credentials from environment variables. Update the UserService and storage layer. --repo myorg/backend
+>
+> **Labels:** `telecoder`
+
+**What happens:**
+
+- Task arrives via CLI, Slack, Telegram, Linear, or Jira.
 - Engine decomposes the task, generates a plan, spins up a Docker sandbox.
 - The agent implements the change inside the sandbox.
 - Verify stage runs tests and linting; failures trigger automatic revisions.
 - Review stage checks the diff; if rejected, a revision round runs (up to `MaxRevisions`).
-- A PR is opened on GitHub.
+- If code was changed, a PR is opened on GitHub. If not, a text answer is posted back.
 
 | Goal | Lever |
 |:-----|:------|
@@ -29,219 +61,435 @@ telecoder run "add rate limiting to /api/users" --repo myorg/backend
 | Run on remote machines | Use the SSH sandbox runtime (`sandbox/ssh/`) |
 | Custom quality gates | Add a custom `pipeline.Stage` (e.g. security scan) |
 
-### 2. Swap the In-Sandbox Agent
+### 2. Ask a Question (No PR)
 
-**Story:** The team wants to use a different coding agent — Claude Code, Codex CLI, Goose, Aider, or any CLI-based agent.
+**Story:** An engineer asks a question about a codebase. The agent reads the code and returns a text answer. No branch, no PR.
 
-The sandbox entrypoint (`docker/entrypoint.sh`) selects the agent. Swapping it is a Dockerfile + entrypoint change — no Go code changes.
-
-**Option A — Entrypoint swap**
-
-```dockerfile
-# docker/base.Dockerfile — install the agent
-RUN npm install -g @anthropic-ai/claude-code
-```
+**Example: CLI**
 
 ```bash
-# docker/entrypoint.sh — invoke it
-claude -p "$TELECODER_PROMPT" --allowedTools "Bash,Read,Write,Edit" --output-format stream-json
+telecoder run "what testing framework does this project use and how are tests organized?" --repo myorg/frontend
 ```
 
-**Option B — Separate image**
+Output:
 
-Build a dedicated image and point TeleCoder at it:
+```
+Done: This project uses Vitest for unit tests (in __tests__/ directories co-located
+with source files) and Playwright for e2e tests (in e2e/). Test config is in
+vitest.config.ts and playwright.config.ts. Run unit tests with `npm test` and
+e2e tests with `npm run test:e2e`.
+```
+
+**Example: Slack**
+
+```
+@TeleCoder what environment variables does this service require? List them with descriptions. --repo myorg/auth-service
+```
+
+**Example: Telegram**
+
+```
+explain the authentication flow in this codebase -- how does a request go from login to getting a JWT? --repo myorg/backend
+```
+
+The agent reads the code, determines no changes are needed, and returns a text answer directly.
+
+### 3. Swap the In-Sandbox Agent
+
+**Story:** The team wants to use a specific coding agent for a task -- Claude Code for complex refactors, Codex for simple fixes.
+
+**Example: Per-session override via CLI**
 
 ```bash
-export TELECODER_DOCKER_IMAGE=my-claude-sandbox
+# Use Claude Code for this task
+telecoder run "refactor the payment module to use the strategy pattern" --repo myorg/backend --agent claude-code
+
+# Use Codex for a simple fix
+telecoder run "fix the typo in the error message on line 42 of src/utils.go" --repo myorg/backend --agent codex
 ```
 
-The `sandbox.Runtime` interface doesn't care what runs inside the container.
+**Example: Per-session override via API**
+
+```bash
+curl -X POST http://localhost:7080/api/sessions \
+  -H "Content-Type: application/json" \
+  -d '{"repo":"myorg/backend","prompt":"add retry logic to the HTTP client","agent":"claude-code"}'
+```
+
+**Example: Global default**
+
+```bash
+# Set the default agent for all sessions
+export TELECODER_CODING_AGENT=claude-code
+telecoder serve
+```
+
+The sandbox ships with all three agents (OpenCode, Claude Code, Codex CLI). `TELECODER_CODING_AGENT` controls which one runs as primary; the others remain available as CLI tools the agent can invoke.
 
 ---
 
 ## Triggered Workflows
 
-### 3. Ticket-Driven Automation
+### 4. Ticket-Driven Automation (Linear / Jira)
 
-**Story:** When a ticket is created in Jira / Linear / GitHub Issues — or moves to "Ready for Dev" — an agent picks it up. When it finishes, it Slacks the engineer with a PR link. If it gets stuck, it asks for help.
+**Story:** When a ticket is labeled in Linear or Jira, an agent picks it up automatically. When it finishes, it posts the PR link as a comment on the ticket.
 
-**Approach A — Webhook listener (recommended)**
+**Example: Linear**
 
-```go
-func handleTicketWebhook(w http.ResponseWriter, r *http.Request) {
-    ticket := parseTicketEvent(r)
-    if ticket.Status != "ready_for_dev" {
-        return
-    }
-    resp, _ := http.Post("http://localhost:7080/api/sessions", "application/json",
-        toSessionRequest(ticket.Title, ticket.Description, ticket.Repo))
-    store.LinkTicket(ticket.ID, resp.SessionID)
-}
+1. An engineer creates a Linear issue:
+   > **Title:** Add request logging middleware
+   >
+   > **Description:** Log method, path, status code, and duration for every HTTP request. Use structured JSON logging. --repo myorg/api-gateway
+
+2. The engineer (or an automation) adds the `telecoder` label.
+
+3. TeleCoder picks it up, creates a session, and comments:
+   > Starting TeleCoder session for `myorg/api-gateway`...
+
+4. When done:
+   > PR ready: [#87](https://github.com/myorg/api-gateway/pull/87)
+   >
+   > Session `f3a1b2c4` | Branch `telecoder/f3a1b2c4`
+
+**Example: Jira**
+
+1. A Jira issue exists:
+   > **PLAT-456:** Add health check endpoint
+   >
+   > **Description:** Add GET /healthz that returns 200 when the service is up and all dependencies (DB, Redis, S3) are reachable. Return 503 with details when any dependency is down. --repo myorg/platform-service
+
+2. Label it `telecoder`.
+
+3. TeleCoder comments on the issue with the PR link when done.
+
+**Example: Webhook approach (custom integration)**
+
+For issue trackers without a built-in channel, POST to the API:
+
+```bash
+curl -X POST http://localhost:7080/api/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repo": "myorg/backend",
+    "prompt": "Add health check endpoint that verifies DB and Redis connectivity"
+  }'
 ```
 
-**Approach B — Custom channel**
-
-Implement `channel.Channel` as a ticket poller that creates sessions and notifies engineers on completion/error via Slack.
-
-### 4. PR Comment → Auto-Fix
+### 5. PR Comment Auto-Fix
 
 **Story:** A reviewer leaves a comment on a PR. The agent picks it up, pushes a fix commit, and replies to the thread.
 
-TeleCoder already has a GitHub webhook handler (`POST /api/webhooks/github`) that listens for PR comment events. When a comment mentions the agent (e.g. `@telecoder fix this`), the engine creates a session scoped to that PR and branch. The agent reads the comment, applies the fix, and pushes to the same branch.
+**Example:**
 
-**What's needed:** Mostly built today via `gitprovider/github/webhook.go`. Wire the webhook to your GitHub repo settings.
+1. A TeleCoder PR is open: `PR #142 - Add rate limiting`
+2. A reviewer comments: `@telecoder the rate limit key should include the user ID, not just the IP address`
+3. TeleCoder creates a new session scoped to that PR and branch
+4. The agent reads the comment, modifies the code, and pushes a fix commit to the same branch
+5. The PR updates automatically
 
-### 5. Flaky Test Auto-Repair
+**Setup:** Wire the GitHub webhook (`POST /api/webhooks/github`) to your repo. See the GitHub webhook settings under Settings > Webhooks.
 
-**Story:** CI detects a flaky test. A ticket or webhook fires automatically. The agent fixes the test and opens a PR.
+### 6. Flaky Test Auto-Repair
 
-This is a specialization of story #3. The trigger is your CI system (GitHub Actions, CircleCI, Jenkins) firing a webhook when a test is marked flaky.
+**Story:** CI detects a flaky test. The agent fixes it and opens a PR.
+
+**Example: GitHub Actions**
 
 ```yaml
-# Example GitHub Actions step
-- name: Trigger TeleCoder on flaky test
-  if: steps.tests.outputs.flaky == 'true'
-  run: |
-    curl -X POST http://telecoder:7080/api/sessions \
-      -d '{"repo":"myorg/backend","prompt":"Fix flaky test: ${{ steps.tests.outputs.test_name }}"}'
+name: Fix Flaky Tests
+on:
+  workflow_dispatch:
+    inputs:
+      test_name:
+        description: 'Flaky test name'
+        required: true
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger TeleCoder
+        run: |
+          curl -X POST http://telecoder.internal:7080/api/sessions \
+            -H "Content-Type: application/json" \
+            -d '{
+              "repo": "${{ github.repository }}",
+              "prompt": "Fix flaky test: ${{ inputs.test_name }}. Analyze why it fails intermittently (timing issues, shared state, network dependency) and fix the root cause. Do not just add retries."
+            }'
 ```
 
-### 6. Dependency Upgrades / Security Patches
+**Example: CLI after noticing a flaky test**
 
-**Story:** Dependabot or Snyk flags a vulnerability. The agent upgrades the dependency, fixes breaking changes, and opens a PR with passing tests.
-
-Same trigger pattern — webhook from Dependabot/Snyk/Renovate. The prompt includes the CVE and the target version. The agent runs inside the sandbox with full access to the package manager, so it can `npm install`, run tests, and fix whatever breaks.
-
-```
-telecoder run "upgrade lodash to 4.17.21 to fix CVE-2021-23337, fix any breaking changes" --repo myorg/frontend
+```bash
+telecoder run "TestUserCreation in user_test.go is flaky -- it fails about 10% of the time in CI. Find the race condition and fix it." --repo myorg/backend
 ```
 
-### 7. Codemod / Migration at Scale
+### 7. Dependency Upgrades / Security Patches
+
+**Story:** A vulnerability is flagged. The agent upgrades the dependency, fixes breaking changes, and opens a PR with passing tests.
+
+**Example: Specific CVE**
+
+```bash
+telecoder run "upgrade lodash from 4.17.15 to 4.17.21 to fix CVE-2021-23337. Update any call sites that use removed or changed APIs. Run tests to verify." --repo myorg/frontend
+```
+
+**Example: Major version upgrade**
+
+```bash
+telecoder run "upgrade React from v17 to v18. Update createRoot usage, remove deprecated lifecycle methods, update test utilities from @testing-library/react to use the new render API." --repo myorg/dashboard
+```
+
+**Example: Automated via Dependabot webhook**
+
+When Dependabot opens a PR that fails CI, trigger TeleCoder to fix the breakage:
+
+```bash
+telecoder run "dependabot upgraded stripe-node from v12 to v14 but tests are failing. Fix the breaking API changes -- Stripe renamed PaymentIntents.create to paymentIntents.create (lowercase) and changed the error type." --repo myorg/billing
+```
+
+### 8. Codemod / Migration at Scale
 
 **Story:** "Migrate from SDK v2 to v3 across 12 repos." Fan out parallel TeleCoder sessions, one per repo.
 
+**Example:**
+
 ```bash
-for repo in myorg/svc-a myorg/svc-b myorg/svc-c; do
-  telecoder run "migrate from stripe-sdk v2 to v3, update all call sites" --repo "$repo" &
+REPOS="myorg/svc-users myorg/svc-orders myorg/svc-payments myorg/svc-notifications myorg/svc-inventory"
+PROMPT="migrate from aws-sdk-v2 to aws-sdk-v3. Replace require('aws-sdk') with modular imports (@aws-sdk/client-s3, @aws-sdk/client-dynamodb, etc). Update all API calls to use the new command pattern (new PutObjectCommand instead of s3.putObject). Run tests."
+
+for repo in $REPOS; do
+  telecoder run "$PROMPT" --repo "$repo" &
 done
+wait
+echo "All migrations submitted"
 ```
 
-Each session runs in its own sandbox. TeleCoder handles parallelism natively — every session is an independent container.
+Each session runs in its own sandbox. TeleCoder handles parallelism natively -- every session is an independent container.
 
 ---
 
 ## Integrations: Data & Services
 
-### 8. Connect to Third-Party Services (Supabase, etc.)
+### 9. Connect to Third-Party Services
 
-**Story:** The agent needs access to Supabase (or Stripe, Firebase, PlanetScale, ...) to read schemas, run migrations, or test API calls.
+**Story:** The agent needs access to Supabase, Stripe, Firebase, or another service to read schemas, run migrations, or test API calls.
 
-The sandbox is a full Linux container. Four options, from simplest to most flexible:
+**Example: Pass credentials via environment**
 
-1. **Environment variables** — pass credentials via `SandboxEnv` in config.
-2. **Custom sandbox image** — pre-install service CLIs (`supabase`, `stripe`, `firebase`).
-3. **MCP servers in the sandbox** — agent calls service operations as tools.
-4. **Pipeline stage for context injection** — fetch schemas/specs before the agent starts and inject into `pipeline.Context.RepoCtx`.
+```go
+// In your custom builder
+app, err := telecoder.NewBuilder().
+    WithConfig(telecoder.Config{
+        SandboxEnv: []string{
+            "SUPABASE_URL=https://xyz.supabase.co",
+            "SUPABASE_SERVICE_KEY=eyJ...",
+            "STRIPE_SECRET_KEY=sk_test_...",
+        },
+    }).
+    Build()
+```
 
-### 9. Query Snowflake
+**Example: Custom sandbox image with service CLIs**
 
-**Story:** The agent needs to query Snowflake to understand data models, validate SQL migrations, or generate reports.
+```dockerfile
+# docker/custom.Dockerfile
+FROM telecoder-sandbox
 
-Same pattern as story #8. Options:
+# Install Supabase CLI
+RUN npm install -g supabase
 
-1. **SnowSQL CLI in the sandbox** — install it in the Dockerfile, pass credentials via env.
-2. **Pipeline stage** — fetch `information_schema` before planning and inject as context.
-3. **MCP server** — agent gets `query_snowflake`, `list_tables`, `describe_table` as tools.
-4. **Read-only proxy** — if you don't want raw credentials in the sandbox, expose a query proxy on the Docker network.
+# Install Stripe CLI
+RUN curl -s https://packages.stripe.dev/api/security/keypair/stripe-cli-gpg/public | gpg --dearmor > /usr/share/keyrings/stripe.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/stripe.gpg] https://packages.stripe.dev/stripe-cli-debian-local stable main" > /etc/apt/sources.list.d/stripe.list \
+    && apt-get update && apt-get install -y stripe
+```
+
+```bash
+export TELECODER_DOCKER_IMAGE=my-custom-sandbox
+telecoder serve
+```
+
+Then run tasks that use these services:
+
+```bash
+telecoder run "add a new 'subscriptions' table in Supabase with columns: id, user_id, plan, status, created_at. Generate the migration file and update the TypeScript types." --repo myorg/saas-app
+```
+
+### 10. Query a Data Warehouse
+
+**Story:** The agent needs to query Snowflake/BigQuery to understand data models or validate SQL.
+
+**Example: SnowSQL in the sandbox**
+
+Add SnowSQL to your custom sandbox image, pass credentials via env, then:
+
+```bash
+telecoder run "the revenue_daily materialized view is broken -- it's double-counting refunds. Query information_schema to understand the table relationships, fix the SQL in migrations/views/revenue_daily.sql, and verify the output matches expected totals." --repo myorg/data-platform
+```
+
+**Example: Pipeline stage for schema injection**
+
+Build a custom pipeline stage that fetches `information_schema` from your warehouse before planning begins. The agent receives the schema as context and can write accurate SQL without needing direct database access.
 
 ---
 
 ## Post-Completion Hooks
 
-### 10. Trigger Model Training (Modal)
+### 11. Trigger Downstream Jobs
 
-**Story:** After the agent finishes a code change, automatically trigger a fine-tuning or evaluation job on Modal (or any compute platform).
+**Story:** After the agent finishes a code change, trigger a build, deploy, or training job.
 
-**Option A — Event bus subscriber**
+**Example: Event bus subscriber**
 
 ```go
-bus.Subscribe(func(event model.Event) {
-    if event.Type == "session_complete" {
-        triggerTraining(event.SessionID, event.Metadata)
+ch := app.Engine().Bus().Subscribe(sessionID)
+go func() {
+    for event := range ch {
+        if event.Type == "done" {
+            sess, _ := app.Engine().Store().GetSession(sessionID)
+            if sess.PRUrl != "" {
+                // Trigger a staging deploy
+                triggerDeploy(sess.Repo, sess.Branch)
+                // Or trigger model training on Modal
+                triggerModalTraining(sess.Repo, sess.PRUrl)
+            }
+        }
     }
-})
+}()
 ```
 
-**Option B — Custom pipeline stage** that runs after the review stage approves.
+**Example: GitHub Actions on PR creation**
 
-**Option C — Webhook** — use the GitHub PR creation event to trigger an external service.
+The PR created by TeleCoder triggers your existing CI/CD pipeline automatically. No extra setup needed -- GitHub Actions, CircleCI, or whatever you use will pick up the new branch.
 
-### 11. Auto-Generate Docs / Changelogs
+### 12. Auto-Generate Docs / Changelogs
 
-**Story:** After a PR merges, an agent reads the diff and updates API docs, README, or changelog.
+**Story:** After a PR merges, an agent reads the diff and updates docs or changelog.
 
-**Approach A — GitHub webhook on merge**
+**Example: GitHub webhook on merge**
 
-Listen for `pull_request.closed` + `merged: true` events. Create a TeleCoder session with a prompt like:
+```yaml
+# .github/workflows/auto-docs.yml
+name: Update Docs on Merge
+on:
+  pull_request:
+    types: [closed]
 
+jobs:
+  update-docs:
+    if: github.event.pull_request.merged == true && startsWith(github.event.pull_request.head.ref, 'telecoder/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger doc update
+        run: |
+          curl -X POST http://telecoder.internal:7080/api/sessions \
+            -H "Content-Type: application/json" \
+            -d '{
+              "repo": "${{ github.repository }}",
+              "prompt": "PR #${{ github.event.pull_request.number }} was just merged (branch: ${{ github.event.pull_request.head.ref }}). Update CHANGELOG.md with a summary of the changes and update any affected API documentation in docs/."
+            }'
 ```
-"Update CHANGELOG.md and relevant API docs based on this diff: <diff>"
-```
-
-**Approach B — Pipeline stage**
-
-Add a post-review stage that generates documentation from the plan and diff before the PR is opened.
 
 ---
 
 ## Observability & Ops
 
-### 12. Observability (Datadog / Grafana / OpenTelemetry)
+### 13. Observability
 
-**Story:** The team wants to monitor agent performance, cost, and failure rates in their existing observability stack.
+**Story:** The team wants to monitor agent performance, cost, and failure rates.
 
-TeleCoder's event bus publishes every session lifecycle event. Observability plugs in at three layers:
+TeleCoder's event bus publishes every session lifecycle event. Three extension points:
 
-1. **Event bus subscriber** — translate events into spans/metrics, forward to your backend.
-2. **LLM client wrapper** — wrap `llm.Client` to capture token usage, latency, and cost per pipeline stage.
-3. **Pipeline stage** — ship plan, diff, and review results to your analytics backend.
+**Example: Metrics via event bus**
 
-All three work with existing interfaces. No framework changes.
+```go
+ch := app.Engine().Bus().Subscribe("*") // subscribe to all sessions
+go func() {
+    for event := range ch {
+        switch event.Type {
+        case "done":
+            metrics.IncrCounter("telecoder.sessions.completed", 1)
+        case "error":
+            metrics.IncrCounter("telecoder.sessions.failed", 1)
+        }
+        metrics.RecordDuration("telecoder.session.duration", time.Since(event.CreatedAt))
+    }
+}()
+```
 
-### 13. On-Call Incident Response
+**Example: LLM cost tracking**
 
-**Story:** A PagerDuty / OpsGenie alert fires. The agent reads the alert context (error logs, metrics, stack traces), proposes a hotfix, and opens a PR. The on-call engineer reviews under pressure instead of writing from scratch.
+Wrap `llm.Client` to capture token usage per pipeline stage:
 
-**Approach:** Webhook from your alerting system → TeleCoder session. The prompt includes the alert payload and relevant log snippets. The agent has access to the repo and can look at recent commits, error patterns, and propose a targeted fix.
+```go
+type instrumentedLLM struct {
+    inner llm.Client
+}
+
+func (i *instrumentedLLM) Chat(ctx context.Context, msgs []llm.Message) (string, error) {
+    start := time.Now()
+    resp, err := i.inner.Chat(ctx, msgs)
+    metrics.RecordHistogram("telecoder.llm.latency", time.Since(start).Seconds())
+    metrics.IncrCounter("telecoder.llm.calls", 1)
+    return resp, err
+}
+```
+
+### 14. On-Call Incident Response
+
+**Story:** A PagerDuty alert fires. The agent reads the alert context, proposes a hotfix, and opens a PR. The on-call engineer reviews instead of writing from scratch.
+
+**Example: PagerDuty webhook**
 
 ```go
 func handlePagerDutyWebhook(w http.ResponseWriter, r *http.Request) {
-    alert := parseAlert(r)
-    prompt := fmt.Sprintf("Hotfix: %s\n\nError: %s\nStack trace:\n%s",
-        alert.Summary, alert.Error, alert.StackTrace)
-    createSession(alert.Repo, prompt)
-    slack.PostMessage(alert.OnCallEngineer, "Agent working on hotfix for: " + alert.Summary)
+    alert := parsePagerDutyAlert(r)
+    prompt := fmt.Sprintf(`Hotfix needed for production incident.
+
+Alert: %s
+Service: %s
+Error: %s
+Stack trace:
+%s
+
+Analyze the error, find the root cause in the codebase, and implement a minimal fix.
+Do not refactor unrelated code. Focus only on stopping the error.`,
+        alert.Summary, alert.Service, alert.Error, alert.StackTrace)
+
+    sess, _ := engine.CreateAndRunSession(alert.Repo, prompt)
+
+    // Notify the on-call engineer
+    slack.PostMessage(alert.OnCallChannel,
+        fmt.Sprintf("Agent working on hotfix for: %s (session %s)", alert.Summary, sess.ID))
 }
+```
+
+**Example: CLI during an incident**
+
+```bash
+telecoder run "production is returning 500 errors on POST /api/checkout. The error is 'nil pointer dereference in calculateDiscount'. Find the bug and fix it. This is urgent -- keep the fix minimal." --repo myorg/backend --agent claude-code
 ```
 
 ---
 
 ## Summary
 
-| # | Story | Category | Works today? | Extension needed |
-|:--|:------|:---------|:-------------|:-----------------|
-| 1 | Background coding agent | Core | Yes | None |
-| 2 | Swap the in-sandbox agent | Core | Yes | Dockerfile + entrypoint |
-| 3 | Ticket-driven automation | Triggered | Yes | Webhook handler or custom channel |
-| 4 | PR comment → auto-fix | Triggered | Yes | Wire GitHub webhook |
-| 5 | Flaky test auto-repair | Triggered | Yes | CI webhook trigger |
-| 6 | Dependency upgrades | Triggered | Yes | Webhook from Dependabot/Snyk |
-| 7 | Codemod at scale | Triggered | Yes | Loop over repos |
-| 8 | Third-party services | Data | Yes | Env vars, custom image, MCP, or pipeline stage |
-| 9 | Query Snowflake | Data | Yes | Env vars, custom image, MCP, or pipeline stage |
-| 10 | Trigger model training | Post-completion | Yes | Event subscriber or pipeline stage |
-| 11 | Auto-generate docs | Post-completion | Yes | Merge webhook or pipeline stage |
-| 12 | Observability | Ops | Yes | Event subscriber or LLM wrapper |
-| 13 | On-call incident response | Ops | Yes | Alerting webhook |
+| # | Story | Channel/Trigger | Extension needed |
+|:--|:------|:----------------|:-----------------|
+| 1 | Background coding agent | CLI, Slack, Telegram, Linear, Jira | None |
+| 2 | Ask a question (no PR) | CLI, Slack, Telegram | None |
+| 3 | Swap the coding agent | CLI, API | None (`--agent` flag) |
+| 4 | Ticket-driven automation | Linear, Jira, or webhook | None (built-in channels) |
+| 5 | PR comment auto-fix | GitHub webhook | Wire webhook to repo |
+| 6 | Flaky test auto-repair | CI webhook or CLI | CI trigger step |
+| 7 | Dependency upgrades | CLI or Dependabot webhook | Webhook trigger |
+| 8 | Codemod at scale | CLI (loop) | None |
+| 9 | Third-party services | Any | Env vars or custom sandbox image |
+| 10 | Query data warehouse | Any | Custom sandbox image or pipeline stage |
+| 11 | Post-completion hooks | Event bus or GitHub Actions | Event subscriber or workflow |
+| 12 | Auto-generate docs | GitHub Actions on merge | Workflow trigger |
+| 13 | Observability | Event bus | Event subscriber or LLM wrapper |
+| 14 | On-call incident response | Alerting webhook or CLI | Webhook handler |
 
-**The common pattern:** TeleCoder's interfaces (`sandbox.Runtime`, `pipeline.Stage`, `llm.Client`, `eventbus.Bus`, `channel.Channel`) are the extension points. Most stories require zero framework changes — just a new implementation of an existing interface, a webhook handler, or a subscriber on the event bus.
+**The common pattern:** TeleCoder's interfaces (`sandbox.Runtime`, `pipeline.Stage`, `llm.Client`, `eventbus.Bus`, `channel.Channel`) are the extension points. Most stories require zero framework changes -- just a new implementation of an existing interface, a webhook handler, or a subscriber on the event bus.

@@ -22,10 +22,12 @@ var runCmd = &cobra.Command{
 	Use:   "run [prompt]",
 	Short: "Run a task in a background sandbox",
 	Long: `Create a new session that runs an AI coding agent in a sandbox.
-The agent will work on the task and create a pull request when done.
+The agent will work on the task and create a pull request if code was changed,
+or return a text answer directly if no code changes were needed.
 
 Example:
-  telecoder run "add rate limiting to /api/users" --repo myorg/myapp`,
+  telecoder run "add rate limiting to /api/users" --repo myorg/myapp
+  telecoder run "what testing framework does this project use?" --repo myorg/myapp`,
 	Args: cobra.ExactArgs(1),
 	RunE: runRun,
 }
@@ -110,8 +112,14 @@ func streamEvents(sessionID string) error {
 			fmt.Println(event.Data)
 		case "error":
 			fmt.Fprintf(os.Stderr, "\033[31m[error]\033[0m %s\n", event.Data)
+		case "result":
+			// Result marker — informational, the done event follows.
 		case "done":
-			fmt.Printf("\n\033[32m✓ PR created:\033[0m %s\n", event.Data)
+			if strings.HasPrefix(event.Data, "http") {
+				fmt.Printf("\n\033[32m✓ PR created:\033[0m %s\n", event.Data)
+			} else {
+				fmt.Printf("\n\033[32m✓ Done:\033[0m\n%s\n", event.Data)
+			}
 			return nil
 		}
 	}

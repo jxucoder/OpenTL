@@ -413,3 +413,198 @@ func (s *capturingStubSandbox) ExecCollect(_ context.Context, _ string, _ []stri
 func (s *capturingStubSandbox) CommitAndPush(_ context.Context, _, _, _ string) error               { return nil }
 func (s *capturingStubSandbox) EnsureNetwork(_ context.Context, _ string) error                     { return nil }
 func (s *capturingStubSandbox) IsRunning(_ context.Context, _ string) bool                          { return true }
+
+// --- scriptedScanner emits pre-defined lines to simulate sandbox output ---
+
+type scriptedScanner struct {
+	lines []string
+	idx   int
+}
+
+func (s *scriptedScanner) Scan() bool {
+	if s.idx < len(s.lines) {
+		s.idx++
+		return true
+	}
+	return false
+}
+func (s *scriptedScanner) Text() string { return s.lines[s.idx-1] }
+func (s *scriptedScanner) Err() error   { return nil }
+func (s *scriptedScanner) Close() error { return nil }
+
+// scriptedSandbox returns a scripted log stream from StreamLogs.
+type scriptedSandbox struct {
+	logLines      []string
+	createPRCalls *int // shared counter, optional
+}
+
+func (s *scriptedSandbox) Start(_ context.Context, _ sandbox.StartOptions) (string, error) {
+	return "scripted-container", nil
+}
+func (s *scriptedSandbox) Stop(_ context.Context, _ string) error        { return nil }
+func (s *scriptedSandbox) Wait(_ context.Context, _ string) (int, error) { return 0, nil }
+func (s *scriptedSandbox) StreamLogs(_ context.Context, _ string) (sandbox.LineScanner, error) {
+	return &scriptedScanner{lines: s.logLines}, nil
+}
+func (s *scriptedSandbox) Exec(_ context.Context, _ string, _ []string) (sandbox.LineScanner, error) {
+	return &stubScanner{}, nil
+}
+func (s *scriptedSandbox) ExecCollect(_ context.Context, _ string, _ []string) (string, error) {
+	return "", nil
+}
+func (s *scriptedSandbox) CommitAndPush(_ context.Context, _, _, _ string) error { return nil }
+func (s *scriptedSandbox) EnsureNetwork(_ context.Context, _ string) error       { return nil }
+func (s *scriptedSandbox) IsRunning(_ context.Context, _ string) bool            { return true }
+
+// --- Flexible output tests ---
+
+func TestRunSession_TextResult_NoPR(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := sqliteStore.New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	bus := eventbus.NewInMemoryBus()
+	git := &stubGitProvider{}
+	llmClient := &stubLLM{}
+
+	sb := &scriptedSandbox{
+		logLines: []string{
+			"This project is written in Go.",
+			`###TELECODER_RESULT### {"type":"text"}`,
+		},
+	}
+
+	eng := New(
+		Config{
+			DockerImage:     "test-image",
+			MaxRevisions:    1,
+			ChatIdleTimeout: 30 * time.Minute,
+			ChatMaxMessages: 50,
+		},
+		st, bus, sb, git,
+		pipeline.NewPlanStage(llmClient, ""),
+		pipeline.NewReviewStage(llmClient, ""),
+		pipeline.NewDecomposeStage(llmClient, ""),
+		pipeline.NewVerifyStage(llmClient, ""),
+	)
+
+	sess, err := eng.CreateAndRunSession("owner/repo", "what language is this?")
+	if err != nil {
+		t.Fatalf("CreateAndRunSession: %v", err)
+	}
+
+	// Wait for the background goroutine to finish.
+	time.Sleep(500 * time.Millisecond)
+
+	got, err := eng.Store().GetSession(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+
+	if got.Status != model.StatusComplete {
+		t.Fatalf("expected status 'complete', got %q", got.Status)
+	}
+	if got.Result.Type != model.ResultText {
+		t.Fatalf("expected result type 'text', got %q", got.Result.Type)
+	}
+	if got.Result.Content == "" {
+		t.Fatal("expected non-empty result content")
+	}
+	// No PR should have been created.
+	if git.createPRCalls > 0 {
+		t.Fatalf("expected no CreatePR calls for text result, got %d", git.createPRCalls)
+	}
+	if got.PRUrl != "" {
+		t.Fatalf("expected empty PR URL for text result, got %q", got.PRUrl)
+	}
+}
+
+func TestRunSession_PRResult_BackwardCompat(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := sqliteStore.New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	bus := eventbus.NewInMemoryBus()
+	git := &stubGitProvider{}
+	llmClient := &stubLLM{}
+
+	sb := &scriptedSandbox{
+		logLines: []string{
+			"Making changes...",
+			"###TELECODER_DONE### telecoder/test-pr",
+		},
+	}
+
+	eng := New(
+		Config{
+			DockerImage:     "test-image",
+			MaxRevisions:    1,
+			ChatIdleTimeout: 30 * time.Minute,
+			ChatMaxMessages: 50,
+		},
+		st, bus, sb, git,
+		pipeline.NewPlanStage(llmClient, ""),
+		pipeline.NewReviewStage(llmClient, ""),
+		pipeline.NewDecomposeStage(llmClient, ""),
+		pipeline.NewVerifyStage(llmClient, ""),
+	)
+
+	sess, err := eng.CreateAndRunSession("owner/repo", "fix the bug")
+	if err != nil {
+		t.Fatalf("CreateAndRunSession: %v", err)
+	}
+
+	time.Sleep(500 * time.Millisecond)
+
+	got, err := eng.Store().GetSession(sess.ID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+
+	if got.Status != model.StatusComplete {
+		t.Fatalf("expected status 'complete', got %q", got.Status)
+	}
+	if git.createPRCalls < 1 {
+		t.Fatalf("expected CreatePR to be called, got %d calls", git.createPRCalls)
+	}
+	// Legacy fields should be populated.
+	if got.PRUrl == "" {
+		t.Fatal("expected non-empty PRUrl")
+	}
+	if got.PRNumber == 0 {
+		t.Fatal("expected non-zero PRNumber")
+	}
+	// Result should also be populated.
+	if got.Result.Type != model.ResultPR {
+		t.Fatalf("expected result type 'pr', got %q", got.Result.Type)
+	}
+	if got.Result.PRUrl != got.PRUrl {
+		t.Fatalf("expected Result.PRUrl to match PRUrl, got %q vs %q", got.Result.PRUrl, got.PRUrl)
+	}
+}
+
+func TestDispatchLogLine_ResultMarker(t *testing.T) {
+	eng, _, _ := testEngine(t)
+
+	sess, _ := eng.CreateAndRunSession("owner/repo", "task")
+	time.Sleep(100 * time.Millisecond)
+
+	eng.dispatchLogLine(sess.ID, `###TELECODER_RESULT### {"type":"text"}`)
+
+	events, _ := eng.Store().GetEvents(sess.ID, 0)
+	resultFound := false
+	for _, e := range events {
+		if e.Type == "result" && strings.Contains(e.Data, "text") {
+			resultFound = true
+		}
+	}
+	if !resultFound {
+		t.Fatal("expected RESULT dispatch event with type 'result'")
+	}
+}

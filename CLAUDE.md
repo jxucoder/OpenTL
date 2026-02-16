@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-TeleCoder is an extensible open-source background coding agent framework for engineering teams. Users send a task and get a PR back. It runs AI coding agents (OpenCode, Claude Code, Codex) inside Docker sandboxes that clone a repo, apply changes, push a branch, and create a GitHub pull request.
+TeleCoder is an extensible open-source background coding agent framework for engineering teams. Users send a task and get a PR back — or a direct text answer when no code changes are needed. It runs AI coding agents (OpenCode, Claude Code, Codex) inside Docker sandboxes that clone a repo, apply changes, push a branch, and create a GitHub pull request. For questions and analysis tasks, the agent returns a text result without creating a PR.
 
 TeleCoder is designed as a **pluggable framework**: developers import it as a Go library and compose a custom application by swapping any component via interfaces (store, sandbox, git provider, LLM, pipeline stages, channels).
 
@@ -58,7 +58,7 @@ TeleCoder is built around 7 core interfaces. Every component is swappable:
 4. **`gitprovider.Provider`** — Git hosting (GitHub or custom)
 5. **`eventbus.Bus`** — Real-time event pub/sub
 6. **`pipeline.Stage`** — Orchestration stages (plan, review, decompose, verify, or custom)
-7. **`channel.Channel`** — Input/output transport (Slack, Telegram, or custom)
+7. **`channel.Channel`** — Input/output transport (Slack, Telegram, Linear, Jira, or custom)
 
 ### Builder API
 
@@ -82,7 +82,7 @@ app, err := telecoder.NewBuilder().
 ### Request Flow
 
 ```
-User (CLI/Slack/Telegram/Web) → HTTP API → Engine → Pipeline (Decompose→Plan→Code→Verify→Review) → Sandbox → GitHub PR
+User (CLI/Slack/Telegram/Web) → HTTP API → Engine → Pipeline (Decompose→Plan→Code→Verify→Review) → Sandbox → GitHub PR / Text Answer
 ```
 
 1. User submits a task with a target repo
@@ -91,10 +91,10 @@ User (CLI/Slack/Telegram/Web) → HTTP API → Engine → Pipeline (Decompose→
 4. For each sub-task: pipeline generates a plan via LLM, enriches the prompt
 5. Engine launches a sandbox container via Runtime
 6. Sandbox clones the repo, installs deps, runs the AI agent (OpenCode or Codex)
-7. Agent modifies code, sandbox commits and pushes a branch
-8. Pipeline runs tests/linting (verify stage); failures trigger revisions
-9. Pipeline reviews the diff; may request revisions (up to MaxRevisions rounds)
-10. Engine creates a GitHub PR and marks the session complete
+7. Agent works on the task; sandbox detects whether code was changed
+8. If code changed → commits, pushes branch, signals `DONE` → Pipeline runs verify/review → Engine creates PR
+9. If no code changed → signals `RESULT {"type":"text"}` → Engine stores text result, skips PR creation
+10. Session marked complete with `Result.Type` of `"pr"` or `"text"`
 11. Real-time events streamed to clients via SSE
 
 ### Package Layout
@@ -122,6 +122,8 @@ httpapi/                  # HTTP API handler (chi router, SSE streaming)
 channel/                  # Channel interface
 channel/slack/            # Slack bot (Socket Mode)
 channel/telegram/         # Telegram bot (long polling)
+channel/linear/           # Linear webhook channel (label-triggered)
+channel/jira/             # Jira webhook channel (label-triggered)
 
 cmd/telecoder/            # Reference CLI (Cobra): serve, run, list, status, logs, config
 web/                      # React + Vite + Tailwind web UI
@@ -152,6 +154,8 @@ _examples/minimal/        # Minimal framework usage example
 - **`eventbus/`** — In-memory pub/sub for real-time SSE events. Non-blocking publish.
 - **`channel/slack/`** — Slack bot (Socket Mode). Listens for DMs and slash commands.
 - **`channel/telegram/`** — Telegram bot (long polling). Commands: /start, /chat, /run, /status, /pr. Supports multi-turn chat sessions.
+- **`channel/linear/`** — Linear webhook channel. Triggers on issues labeled "telecoder" (configurable). Posts results back as issue comments via GraphQL API. Webhook endpoint: `/api/webhooks/linear`.
+- **`channel/jira/`** — Jira webhook channel. Triggers on issues labeled "telecoder" (configurable). Posts results back as issue comments via REST API v3. Webhook endpoint: `/api/webhooks/jira`.
 - **`cmd/telecoder/`** — Reference CLI using Cobra. Commands: `serve`, `run`, `list`, `status`, `logs` (with `--follow`), `config` (subcommands: `setup`, `set`, `show`, `path`).
 - **`web/`** — React 19 + Vite 6 + Tailwind CSS 3.4 web UI for session monitoring. SSE event streaming support.
 
@@ -165,13 +169,14 @@ The sandbox image (`docker/base.Dockerfile`) is Ubuntu 24.04 with Node 22, Pytho
 4. Creates feature branch
 5. Auto-detects and installs dependencies (npm/pnpm/yarn/pip/go)
 6. **Agent selection:** `TELECODER_CODING_AGENT` selects the agent (`opencode`, `claude-code`, `codex`). `auto` (default) falls back to API-key-based detection: ANTHROPIC_API_KEY → OpenCode, OPENAI_API_KEY → Codex CLI. Optional `TELECODER_CODING_AGENT_MODEL` overrides the model.
-7. Commits, pushes, and signals completion
+7. Detects whether code was changed: if yes → commits, pushes, signals `DONE`; if no changes → signals `RESULT {"type":"text"}` and exits cleanly
 
 Communication with the server uses marker-based protocols in stdout:
 
 - `###TELECODER_STATUS### message` — status update
 - `###TELECODER_ERROR### message` — error
-- `###TELECODER_DONE### branch-name` — completion signal
+- `###TELECODER_DONE### branch-name` — completion signal (code changes, triggers PR)
+- `###TELECODER_RESULT### {"type":"text"}` — result signal (no code changes, text answer)
 
 Chat-mode sandboxes use `docker/setup.sh` for environment preparation instead of the full entrypoint.
 
@@ -179,8 +184,13 @@ Chat-mode sandboxes use `docker/setup.sh` for environment preparation instead of
 
 Sessions have two modes:
 
-- **`task`** (fire-and-forget): `pending` → `running` → `complete`/`error`. Single prompt execution, creates PR automatically.
+- **`task`** (fire-and-forget): `pending` → `running` → `complete`/`error`. Single prompt execution, agent-decided result. If the agent makes code changes, a PR is created (`Result.Type = "pr"`). If no code changes are made (e.g. a question), a text result is stored (`Result.Type = "text"`) and no PR is created.
 - **`chat`** (persistent sandbox): `pending` → `idle` ↔ `running` → `complete`/`error`. Multiple messages in a single session, sandbox stays alive between messages. User explicitly creates PR when ready. Idle timeout reaper stops inactive sessions.
+
+The `Session.Result` field (type `model.Result`) holds the agent's output:
+- `Type` — `"pr"`, `"text"`, or `""` (none/pending)
+- `Content` — text answer (for `"text"` type)
+- `PRUrl`, `PRNumber` — PR details (for `"pr"` type, mirrors legacy top-level fields)
 
 ### Configuration
 
@@ -202,6 +212,18 @@ Key optional vars:
 - `SLACK_DEFAULT_REPO` — Default repo for Slack commands
 - `TELEGRAM_BOT_TOKEN` — Telegram bot token
 - `TELEGRAM_DEFAULT_REPO` — Default repo for Telegram commands
+- `LINEAR_API_KEY` — Linear API key (enables Linear channel)
+- `LINEAR_WEBHOOK_SECRET` — HMAC secret for Linear webhook verification
+- `LINEAR_TRIGGER_LABEL` — Label that triggers TeleCoder (default `telecoder`)
+- `LINEAR_DEFAULT_REPO` — Default repo for Linear issues
+- `LINEAR_WEBHOOK_ADDR` — Listen address for Linear webhook server (default `:7090`)
+- `JIRA_BASE_URL` — Jira instance URL, e.g. `https://yourcompany.atlassian.net`
+- `JIRA_USER_EMAIL` — Jira user email for API auth
+- `JIRA_API_TOKEN` — Jira API token (enables Jira channel, requires all three JIRA_ vars)
+- `JIRA_WEBHOOK_SECRET` — HMAC secret for Jira webhook verification
+- `JIRA_TRIGGER_LABEL` — Label that triggers TeleCoder (default `telecoder`)
+- `JIRA_DEFAULT_REPO` — Default repo for Jira issues
+- `JIRA_WEBHOOK_ADDR` — Listen address for Jira webhook server (default `:7091`)
 
 Config file: `~/.telecoder/config.env` (loaded by `serve` command).
 

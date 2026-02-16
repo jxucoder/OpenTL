@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -466,6 +467,8 @@ type sandboxRoundResult struct {
 	containerID string
 	exitCode    int
 	lastLine    string
+	resultType  model.ResultType
+	outputLines []string
 }
 
 func (e *Engine) runSession(sessionID string) {
@@ -508,63 +511,82 @@ func (e *Engine) runSession(sessionID string) {
 		subTasks = []pipeline.SubTask{{Title: "Complete task", Description: sess.Prompt}}
 	}
 
-	var lastContainerID string
+	var lastResult *sandboxRoundResult
 	for i, task := range subTasks {
 		if len(subTasks) > 1 {
 			e.emitEvent(sess.ID, "step", fmt.Sprintf("Step %d/%d: %s", i+1, len(subTasks), task.Title))
 		}
 
-		containerID, err := e.runSubTask(ctx, sess, task.Description, repoContext, sess.Agent)
+		result, err := e.runSubTask(ctx, sess, task.Description, repoContext, sess.Agent)
 		if err != nil {
 			e.failSession(sess, fmt.Sprintf("step %d/%d failed: %v", i+1, len(subTasks), err))
-			if lastContainerID != "" {
-				e.sandbox.Stop(ctx, lastContainerID)
+			if lastResult != nil {
+				e.sandbox.Stop(ctx, lastResult.containerID)
 			}
 			return
 		}
 
-		if lastContainerID != "" && lastContainerID != containerID {
-			e.sandbox.Stop(ctx, lastContainerID)
+		if lastResult != nil && lastResult.containerID != result.containerID {
+			e.sandbox.Stop(ctx, lastResult.containerID)
 		}
-		lastContainerID = containerID
+		lastResult = result
 	}
 
-	e.emitEvent(sess.ID, "status", "Creating pull request...")
+	// Decide output based on the last sub-task's result type.
+	if lastResult != nil && lastResult.resultType == model.ResultText {
+		// Text result — no PR needed.
+		content := strings.Join(lastResult.outputLines, "\n")
+		sess.Status = model.StatusComplete
+		sess.Result = model.Result{
+			Type:    model.ResultText,
+			Content: content,
+		}
+		e.store.UpdateSession(sess)
+		e.emitEvent(sess.ID, "done", content)
+	} else {
+		// PR result — existing flow.
+		e.emitEvent(sess.ID, "status", "Creating pull request...")
 
-	defaultBranch, err := e.git.GetDefaultBranch(ctx, sess.Repo)
-	if err != nil {
-		defaultBranch = "main"
+		defaultBranch, err := e.git.GetDefaultBranch(ctx, sess.Repo)
+		if err != nil {
+			defaultBranch = "main"
+		}
+
+		prTitle := fmt.Sprintf("telecoder: %s", model.Truncate(sess.Prompt, 72))
+		prBody := fmt.Sprintf("## TeleCoder Session `%s`\n\n**Prompt:**\n> %s\n\n---\n*Created by [TeleCoder](https://github.com/jxucoder/TeleCoder)*",
+			sess.ID, sess.Prompt)
+
+		prURL, prNumber, err := e.git.CreatePR(ctx, gitprovider.PROptions{
+			Repo:   sess.Repo,
+			Branch: sess.Branch,
+			Base:   defaultBranch,
+			Title:  prTitle,
+			Body:   prBody,
+		})
+		if err != nil {
+			e.failSession(sess, fmt.Sprintf("failed to create PR: %v", err))
+			return
+		}
+
+		sess.Status = model.StatusComplete
+		sess.PRUrl = prURL
+		sess.PRNumber = prNumber
+		sess.Result = model.Result{
+			Type:     model.ResultPR,
+			PRUrl:    prURL,
+			PRNumber: prNumber,
+		}
+		e.store.UpdateSession(sess)
+
+		e.emitEvent(sess.ID, "done", prURL)
 	}
 
-	prTitle := fmt.Sprintf("telecoder: %s", model.Truncate(sess.Prompt, 72))
-	prBody := fmt.Sprintf("## TeleCoder Session `%s`\n\n**Prompt:**\n> %s\n\n---\n*Created by [TeleCoder](https://github.com/jxucoder/TeleCoder)*",
-		sess.ID, sess.Prompt)
-
-	prURL, prNumber, err := e.git.CreatePR(ctx, gitprovider.PROptions{
-		Repo:   sess.Repo,
-		Branch: sess.Branch,
-		Base:   defaultBranch,
-		Title:  prTitle,
-		Body:   prBody,
-	})
-	if err != nil {
-		e.failSession(sess, fmt.Sprintf("failed to create PR: %v", err))
-		return
-	}
-
-	sess.Status = model.StatusComplete
-	sess.PRUrl = prURL
-	sess.PRNumber = prNumber
-	e.store.UpdateSession(sess)
-
-	e.emitEvent(sess.ID, "done", prURL)
-
-	if lastContainerID != "" {
-		e.sandbox.Stop(ctx, lastContainerID)
+	if lastResult != nil {
+		e.sandbox.Stop(ctx, lastResult.containerID)
 	}
 }
 
-func (e *Engine) runSubTask(ctx context.Context, sess *model.Session, taskPrompt, repoContext, sessionAgent string) (string, error) {
+func (e *Engine) runSubTask(ctx context.Context, sess *model.Session, taskPrompt, repoContext, sessionAgent string) (*sandboxRoundResult, error) {
 	prompt := taskPrompt
 	var plan string
 	if e.plan != nil {
@@ -586,7 +608,7 @@ func (e *Engine) runSubTask(ctx context.Context, sess *model.Session, taskPrompt
 	}
 
 	maxRounds := e.config.MaxRevisions
-	var lastContainerID string
+	var lastResult *sandboxRoundResult
 
 	for round := 0; round <= maxRounds; round++ {
 		if round > 0 {
@@ -595,20 +617,25 @@ func (e *Engine) runSubTask(ctx context.Context, sess *model.Session, taskPrompt
 
 		result, err := e.runSandboxRoundWithAgent(ctx, sess, prompt, sessionAgent)
 		if err != nil {
-			return lastContainerID, err
+			return lastResult, err
 		}
 
-		if lastContainerID != "" && lastContainerID != result.containerID {
-			e.sandbox.Stop(ctx, lastContainerID)
+		if lastResult != nil && lastResult.containerID != result.containerID {
+			e.sandbox.Stop(ctx, lastResult.containerID)
 		}
-		lastContainerID = result.containerID
+		lastResult = result
 
 		if result.exitCode != 0 {
 			errMsg := fmt.Sprintf("sandbox exited with code %d", result.exitCode)
 			if result.lastLine != "" {
 				errMsg += ": " + result.lastLine
 			}
-			return lastContainerID, fmt.Errorf("%s", errMsg)
+			return lastResult, fmt.Errorf("%s", errMsg)
+		}
+
+		// Text results don't need verify or review.
+		if result.resultType == model.ResultText {
+			return lastResult, nil
 		}
 
 		// Run verify (test/lint) if configured.
@@ -659,7 +686,7 @@ func (e *Engine) runSubTask(ctx context.Context, sess *model.Session, taskPrompt
 		prompt = pipeline.RevisePrompt(taskPrompt, plan, review.Feedback)
 	}
 
-	return lastContainerID, nil
+	return lastResult, nil
 }
 
 func (e *Engine) runSandboxRound(ctx context.Context, sess *model.Session, prompt string) (*sandboxRoundResult, error) {
@@ -703,12 +730,26 @@ func (e *Engine) runSandboxRoundWithAgent(ctx context.Context, sess *model.Sessi
 	defer logStream.Close()
 
 	var lastLine string
+	var resultType model.ResultType
+	var outputLines []string
 	for logStream.Scan() {
 		line := logStream.Text()
 		lastLine = line
 		e.dispatchLogLine(sess.ID, line)
-		if strings.HasPrefix(line, "###TELECODER_DONE### ") {
+		switch {
+		case strings.HasPrefix(line, "###TELECODER_DONE### "):
 			sess.Branch = strings.TrimPrefix(line, "###TELECODER_DONE### ")
+			resultType = model.ResultPR
+		case strings.HasPrefix(line, "###TELECODER_RESULT### "):
+			payload := strings.TrimPrefix(line, "###TELECODER_RESULT### ")
+			var parsed struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal([]byte(payload), &parsed); err == nil {
+				resultType = model.ResultType(parsed.Type)
+			}
+		case !strings.HasPrefix(line, "###TELECODER_"):
+			outputLines = append(outputLines, line)
 		}
 	}
 
@@ -721,6 +762,8 @@ func (e *Engine) runSandboxRoundWithAgent(ctx context.Context, sess *model.Sessi
 		containerID: containerID,
 		exitCode:    exitCode,
 		lastLine:    lastLine,
+		resultType:  resultType,
+		outputLines: outputLines,
 	}, nil
 }
 
@@ -940,6 +983,8 @@ func (e *Engine) dispatchLogLine(sessionID, line string) {
 	case strings.HasPrefix(line, "###TELECODER_DONE### "):
 		branch := strings.TrimPrefix(line, "###TELECODER_DONE### ")
 		e.emitEvent(sessionID, "status", fmt.Sprintf("Branch pushed: %s", branch))
+	case strings.HasPrefix(line, "###TELECODER_RESULT### "):
+		e.emitEvent(sessionID, "result", strings.TrimPrefix(line, "###TELECODER_RESULT### "))
 	default:
 		e.emitEvent(sessionID, "output", line)
 	}

@@ -50,13 +50,18 @@ telecoder --server http://YOUR_SERVER_IP:7080 run "add rate limiting" --repo you
 
 **From Slack:** `@TeleCoder add rate limiting --repo your-org/your-repo`
 
+**From Linear/Jira:** label an issue with `telecoder` and the agent picks it up automatically.
+
 ## What You Need Before Deploying
 
-Gather these tokens (~5 minutes total):
+Gather these tokens:
 
 1. **GitHub Token** (required) -- [github.com/settings/tokens](https://github.com/settings/tokens) (select `repo` scope)
 2. **Anthropic API Key** or **OpenAI API Key** (at least one) -- [console.anthropic.com](https://console.anthropic.com/settings/keys) or [platform.openai.com](https://platform.openai.com/api-keys)
 3. **Telegram Bot Token** (optional) -- message [@BotFather](https://t.me/BotFather) on Telegram, send `/newbot`, copy the token
+4. **Slack tokens** (optional) -- see [Slack Setup](slack-setup.md)
+5. **Linear API Key** (optional) -- see [Linear Setup](linear-setup.md)
+6. **Jira credentials** (optional) -- see [Jira Setup](jira-setup.md)
 
 The deploy script will prompt you for each one interactively.
 
@@ -104,6 +109,7 @@ For personal use (one task at a time from Telegram), a 2GB server is fine.
 - The server listens on port 7080 (HTTP API). Firewall it if you don't need remote web access.
 - The Telegram bot uses **outbound** long-polling -- no inbound ports needed.
 - The Slack bot uses **outbound** Socket Mode -- no inbound ports needed.
+- Linear and Jira channels listen on separate ports (default `:7090` and `:7091`) for **inbound** webhooks. Open these ports if using those integrations.
 - Your tokens are stored in `~/.telecoder/config.env` with `0600` permissions.
 - The `.env` file is already in `.gitignore`.
 
@@ -112,5 +118,14 @@ For personal use (one task at a time from Telegram), a 2GB server is fine.
 ```bash
 ufw allow 22        # SSH
 ufw deny 7080       # Block web API from outside
+ufw enable
+```
+
+### Firewall (with Linear/Jira webhooks)
+
+```bash
+ufw allow 22        # SSH
+ufw allow 7090      # Linear webhooks
+ufw allow 7091      # Jira webhooks
 ufw enable
 ```

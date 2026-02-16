@@ -4,7 +4,7 @@
 
 **An extensible background coding agent framework for engineering teams.**
 
-Send a task. Get a PR.
+Send a task. Get a PR — or a direct answer.
 
 [![Go](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go&logoColor=white)](https://go.dev)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -16,17 +16,21 @@ Send a task. Get a PR.
 
 ```
 telecoder run "add rate limiting to /api/users" --repo myorg/myapp
-# ...agent works in background...
 # -> PR #142 opened: https://github.com/myorg/myapp/pull/142
+
+telecoder run "what testing framework does this project use?" --repo myorg/myapp
+# -> Done: This project uses Jest for unit tests and Playwright for e2e tests.
 ```
+
+Ask anything — features, bug fixes, refactors, questions, code reviews, security audits. If the agent changes code, you get a PR. If not, you get a direct answer.
 
 ## How It Works
 
 1. You send a task — via **CLI**, **Slack**, **Telegram**, or **Web UI**
 2. TeleCoder spins up an **isolated Docker sandbox** with your repo
 3. A coding agent works on the task — [OpenCode](https://opencode.ai/), [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview), or [Codex](https://openai.com/index/codex/). The sandbox ships with all three, so the agent can invoke other agents as CLI tools when needed.
-4. Changes are committed, pushed, and a **PR is opened**
-5. You review the PR
+4. If code was changed → commits, pushes, and a **PR is opened**; if no code changes → returns a **text answer** directly
+5. You review the PR (or read the answer)
 
 ```mermaid
 graph LR
@@ -42,25 +46,28 @@ graph LR
     end
 
     GitHub["GitHub PR"]
+    Text["Text Answer"]
 
     CLI --> server
     Slack --> server
     TG --> server
     Web --> server
     server --> GitHub
+    server --> Text
 ```
 
 ## Why TeleCoder
 
 TeleCoder is built for teams that want the speed of AI coding without turning every task into manual copy-paste and local prompt wrangling.
 
+- **Flexible output** — code tasks produce PRs; questions and analysis tasks return text answers directly. The agent decides.
 - **Stay in your normal workflow** — submit tasks from CLI, Slack, or Telegram and review real PRs in GitHub.
 - **Protect your development environment** — every task runs in an isolated Docker sandbox instead of your local machine.
 - **Keep quality guardrails** — optional plan/review stages and revision loops reduce low-quality one-shot outputs.
 - **Scale beyond a single bot** — run multiple sessions in parallel, track status, and stream logs/events.
 - **Own your architecture** — TeleCoder is a framework, so you can swap LLMs, sandboxes, stores, git providers, and channels.
 
-If you just want to run tasks and get PRs, use the CLI and defaults.
+If you just want to run tasks and get PRs (or text answers), use the CLI and defaults.
 If you want to build a custom coding-agent product, import TeleCoder as a Go library.
 
 ## For Builders
@@ -154,8 +161,11 @@ This builds the Docker image that runs the coding agent. It includes Ubuntu 24.0
 # Start the server
 telecoder serve
 
-# In another terminal — run a task
+# In another terminal — run a code task (produces a PR)
 telecoder run "fix the typo in README.md" --repo yourorg/yourrepo
+
+# Or ask a question (returns a text answer, no PR)
+telecoder run "what language is this project written in?" --repo yourorg/yourrepo
 
 # List sessions
 telecoder list
@@ -195,8 +205,10 @@ make docker-up
 | [Deployment](docs/deploy.md) | VPS deployment with Docker Compose |
 | [Slack Setup](docs/slack-setup.md) | Connect your Slack workspace |
 | [Telegram Setup](docs/telegram-setup.md) | Set up the Telegram bot |
+| [Linear Setup](docs/linear-setup.md) | Trigger tasks from Linear issues |
+| [Jira Setup](docs/jira-setup.md) | Trigger tasks from Jira issues |
 | [Reference](docs/reference.md) | Architecture, interfaces, API, config, structure, roadmap |
-| [User Stories](docs/user-stories.md) | Real-world use cases and extension scenarios |
+| [User Stories](docs/user-stories.md) | Real-world use cases with examples |
 
 ## License
 

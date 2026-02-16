@@ -53,6 +53,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		Branch    string `json:"branch"`
 		PRUrl     string `json:"pr_url"`
 		PRNumber  int    `json:"pr_number"`
+		Result    struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+			PRUrl   string `json:"pr_url"`
+		} `json:"result"`
 		Error     string `json:"error"`
 		CreatedAt string `json:"created_at"`
 		UpdatedAt string `json:"updated_at"`
@@ -68,8 +73,18 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Prompt:   %s\n", sess.Prompt)
 	fmt.Printf("Created:  %s\n", sess.CreatedAt)
 	fmt.Printf("Updated:  %s\n", sess.UpdatedAt)
+	if sess.Result.Type != "" {
+		fmt.Printf("Result:   %s\n", sess.Result.Type)
+	}
 	if sess.PRUrl != "" {
 		fmt.Printf("PR:       %s\n", sess.PRUrl)
+	}
+	if sess.Result.Type == "text" && sess.Result.Content != "" {
+		content := sess.Result.Content
+		if len(content) > 500 {
+			content = content[:497] + "..."
+		}
+		fmt.Printf("Answer:   %s\n", content)
 	}
 	if sess.Error != "" {
 		fmt.Printf("Error:    %s\n", sess.Error)

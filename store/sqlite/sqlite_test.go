@@ -225,6 +225,73 @@ func TestGetEventsAfterID(t *testing.T) {
 	}
 }
 
+func TestSessionResult_Persistence(t *testing.T) {
+	store := newTestStore(t)
+	now := time.Now().UTC()
+
+	sess := &model.Session{
+		ID: "res-test", Repo: "owner/repo", Prompt: "what lang?",
+		Mode: model.ModeTask, Status: model.StatusRunning,
+		Branch: "telecoder/res-test", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateSession(sess); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	// Set a text result.
+	sess.Status = model.StatusComplete
+	sess.Result = model.Result{
+		Type:    model.ResultText,
+		Content: "This project is written in Go.",
+	}
+	if err := store.UpdateSession(sess); err != nil {
+		t.Fatalf("update session: %v", err)
+	}
+
+	got, err := store.GetSession("res-test")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if got.Result.Type != model.ResultText {
+		t.Fatalf("expected result type 'text', got %q", got.Result.Type)
+	}
+	if got.Result.Content != "This project is written in Go." {
+		t.Fatalf("expected result content, got %q", got.Result.Content)
+	}
+
+	// Now test PR result with backfill.
+	sess2 := &model.Session{
+		ID: "res-pr", Repo: "owner/repo", Prompt: "fix bug",
+		Mode: model.ModeTask, Status: model.StatusRunning,
+		Branch: "telecoder/res-pr", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.CreateSession(sess2); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	sess2.Status = model.StatusComplete
+	sess2.PRUrl = "https://github.com/owner/repo/pull/10"
+	sess2.PRNumber = 10
+	sess2.Result = model.Result{
+		Type:     model.ResultPR,
+		PRUrl:    "https://github.com/owner/repo/pull/10",
+		PRNumber: 10,
+	}
+	if err := store.UpdateSession(sess2); err != nil {
+		t.Fatalf("update session: %v", err)
+	}
+
+	got2, _ := store.GetSession("res-pr")
+	if got2.Result.Type != model.ResultPR {
+		t.Fatalf("expected result type 'pr', got %q", got2.Result.Type)
+	}
+	if got2.Result.PRUrl != "https://github.com/owner/repo/pull/10" {
+		t.Fatalf("expected result PR URL, got %q", got2.Result.PRUrl)
+	}
+	if got2.Result.PRNumber != 10 {
+		t.Fatalf("expected result PR number 10, got %d", got2.Result.PRNumber)
+	}
+}
+
 func TestUpdateSessionPRFields(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()

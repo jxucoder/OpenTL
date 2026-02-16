@@ -13,6 +13,9 @@ Your plan should include:
 3. **Testing** - How to verify the changes work
 4. **Risks** - Any potential issues or edge cases to watch for
 
+If the task is a question or analysis that does not require code changes,
+respond with "NO_CODE_CHANGE" on the first line, followed by the answer.
+
 Keep the plan concise and actionable. Focus on WHAT to change and WHY,
 not the exact code (the coding agent will handle implementation details).
 
@@ -49,6 +52,10 @@ Rules:
   for function X"), return a SINGLE sub-task.
 - For complex, multi-concern tasks (e.g. "add user authentication with login,
   signup, and password reset"), break into 2-5 ordered steps.
+- For questions, analysis, or research tasks that don't require code changes
+  (e.g. "what language is this project written in?", "explain the auth flow"),
+  return a SINGLE sub-task titled "Answer question" with the full question as
+  the description.
 - Each step should be independently executable and testable.
 - Steps are executed sequentially on the same git branch -- later steps can
   depend on earlier steps' changes.

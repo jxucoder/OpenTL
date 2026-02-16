@@ -15,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 
 	telecoder "github.com/jxucoder/TeleCoder"
+	channelJira "github.com/jxucoder/TeleCoder/channel/jira"
+	channelLinear "github.com/jxucoder/TeleCoder/channel/linear"
 	channelSlack "github.com/jxucoder/TeleCoder/channel/slack"
 	channelTelegram "github.com/jxucoder/TeleCoder/channel/telegram"
 )
@@ -108,6 +110,52 @@ func runServe(cmd *cobra.Command, args []string) error {
 			builder.WithChannel(tgBot)
 			fmt.Println("Telegram bot enabled (long polling)")
 		}
+	}
+
+	// Add Linear channel if configured.
+	linearAPIKey := os.Getenv("LINEAR_API_KEY")
+	if linearAPIKey != "" {
+		var opts []channelLinear.Option
+		if addr := os.Getenv("LINEAR_WEBHOOK_ADDR"); addr != "" {
+			opts = append(opts, channelLinear.WithAddr(addr))
+		}
+		linearBot := channelLinear.New(
+			linearAPIKey,
+			os.Getenv("LINEAR_WEBHOOK_SECRET"),
+			os.Getenv("LINEAR_TRIGGER_LABEL"),
+			os.Getenv("LINEAR_DEFAULT_REPO"),
+			app.Engine().Store(),
+			app.Engine().Bus(),
+			app.Engine(),
+			opts...,
+		)
+		builder.WithChannel(linearBot)
+		fmt.Println("Linear channel enabled (webhook)")
+	}
+
+	// Add Jira channel if configured.
+	jiraBaseURL := os.Getenv("JIRA_BASE_URL")
+	jiraEmail := os.Getenv("JIRA_USER_EMAIL")
+	jiraToken := os.Getenv("JIRA_API_TOKEN")
+	if jiraBaseURL != "" && jiraEmail != "" && jiraToken != "" {
+		var opts []channelJira.Option
+		if addr := os.Getenv("JIRA_WEBHOOK_ADDR"); addr != "" {
+			opts = append(opts, channelJira.WithAddr(addr))
+		}
+		jiraBot := channelJira.New(
+			jiraBaseURL,
+			jiraEmail,
+			jiraToken,
+			os.Getenv("JIRA_WEBHOOK_SECRET"),
+			os.Getenv("JIRA_TRIGGER_LABEL"),
+			os.Getenv("JIRA_DEFAULT_REPO"),
+			app.Engine().Store(),
+			app.Engine().Bus(),
+			app.Engine(),
+			opts...,
+		)
+		builder.WithChannel(jiraBot)
+		fmt.Println("Jira channel enabled (webhook)")
 	}
 
 	// Rebuild with channels added.

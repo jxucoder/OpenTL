@@ -69,3 +69,15 @@ func TestModeConstants(t *testing.T) {
 		t.Fatalf("expected 'chat', got %q", ModeChat)
 	}
 }
+
+func TestResultTypeConstants(t *testing.T) {
+	if string(ResultPR) != "pr" {
+		t.Fatalf("expected 'pr', got %q", ResultPR)
+	}
+	if string(ResultText) != "text" {
+		t.Fatalf("expected 'text', got %q", ResultText)
+	}
+	if string(ResultNone) != "" {
+		t.Fatalf("expected empty string, got %q", ResultNone)
+	}
+}

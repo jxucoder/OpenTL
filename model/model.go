@@ -20,11 +20,28 @@ const (
 type Mode string
 
 const (
-	// ModeTask is the default fire-and-forget mode (one prompt → PR).
+	// ModeTask is the default fire-and-forget mode (one prompt → agent-decided result).
 	ModeTask Mode = "task"
 	// ModeChat is multi-turn interactive mode (persistent sandbox, multiple messages).
 	ModeChat Mode = "chat"
 )
+
+// ResultType indicates what kind of output the agent produced.
+type ResultType string
+
+const (
+	ResultPR   ResultType = "pr"
+	ResultText ResultType = "text"
+	ResultNone ResultType = ""
+)
+
+// Result holds the agent's output. The type determines which fields are populated.
+type Result struct {
+	Type     ResultType `json:"type"`
+	Content  string     `json:"content,omitempty"`
+	PRUrl    string     `json:"pr_url,omitempty"`
+	PRNumber int        `json:"pr_number,omitempty"`
+}
 
 // Session represents a single TeleCoder task execution.
 type Session struct {
@@ -37,6 +54,7 @@ type Session struct {
 	Agent       string    `json:"agent,omitempty"` // per-session agent override
 	PRUrl       string    `json:"pr_url,omitempty"`
 	PRNumber    int       `json:"pr_number,omitempty"`
+	Result      Result    `json:"result"`
 	ContainerID string    `json:"-"`
 	Error       string    `json:"error,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
