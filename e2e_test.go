@@ -1,4 +1,4 @@
-// End-to-end test for the multi-agent pipeline.
+// End-to-end tests for the TeleCoder server stack.
 //
 // This test exercises the full server stack:
 //   - Real HTTP router (chi)

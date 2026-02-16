@@ -320,9 +320,9 @@ func (e *Engine) runChatMessage(sessionID, content string) {
 	e.store.UpdateSession(sess)
 	e.emitEvent(sess.ID, "status", "Running agent...")
 
+	agentCmd := e.chatAgentCommand(sess.Agent, content)
 	agentStream, err := e.sandbox.Exec(ctx, sess.ContainerID, []string{
-		"bash", "-c",
-		fmt.Sprintf("cd /workspace/repo && opencode -p %q 2>&1", content),
+		"bash", "-c", agentCmd,
 	})
 	if err != nil {
 		log.Printf("Chat message exec failed: %v", err)
@@ -443,6 +443,21 @@ func (e *Engine) resolveAgentName(sessionAgent string) string {
 		return e.config.Agent
 	}
 	return ""
+}
+
+// chatAgentCommand returns the shell command to run for a chat message,
+// selecting the correct agent binary based on the session/config agent setting.
+func (e *Engine) chatAgentCommand(sessionAgent, content string) string {
+	agent := e.resolveAgentName(sessionAgent)
+	switch agent {
+	case "claude-code":
+		return fmt.Sprintf("cd /workspace/repo && claude --print %q 2>&1", content)
+	case "codex":
+		return fmt.Sprintf("cd /workspace/repo && codex exec --full-auto --ephemeral %q 2>&1", content)
+	default:
+		// "opencode" or "" (auto fallback).
+		return fmt.Sprintf("cd /workspace/repo && opencode -p %q 2>&1", content)
+	}
 }
 
 // --- Task session execution ---
