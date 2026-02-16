@@ -24,7 +24,7 @@ telecoder run "add rate limiting to /api/users" --repo myorg/myapp
 
 1. You send a task — via **CLI**, **Slack**, **Telegram**, or **Web UI**
 2. TeleCoder spins up an **isolated Docker sandbox** with your repo
-3. A coding agent works on the task — [OpenCode](https://opencode.ai/), [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview), or [Codex](https://openai.com/index/codex/)
+3. A coding agent works on the task — [OpenCode](https://opencode.ai/), [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview), or [Codex](https://openai.com/index/codex/). The sandbox ships with all three, so the agent can invoke other agents as CLI tools when needed.
 4. Changes are committed, pushed, and a **PR is opened**
 5. You review the PR
 
@@ -135,7 +135,7 @@ cp .env.example .env
 | `TELECODER_DOCKER_IMAGE` | `telecoder-sandbox` | Sandbox Docker image name |
 | `TELECODER_MAX_REVISIONS` | `1` | Max review/revision rounds per sub-task |
 | `TELECODER_PLANNER_MODEL` | auto | Override the LLM model used for plan/review pipeline stages |
-| `TELECODER_AGENT` | `auto` | Coding agent: `opencode`, `claude-code`, `codex`, or `auto` |
+| `TELECODER_AGENT` | `auto` | Primary coding agent: `opencode`, `claude-code`, `codex`, or `auto`. All agents are available in the sandbox as CLI tools. |
 | `TELECODER_AGENT_MODEL` | auto | Override the model used by the in-sandbox coding agent |
 | `TELECODER_SERVER` | `http://localhost:7080` | Server URL (used by the CLI when talking to a remote server) |
 
@@ -147,9 +147,7 @@ For Slack, Telegram, and webhook configuration, see [docs/reference.md](docs/ref
 make sandbox-image
 ```
 
-This builds the Docker image that runs the coding agent. It includes Ubuntu 24.04, Node 22, Python 3.12, Go, and pre-installed agents (OpenCode, Claude Code, Codex CLI).
-
-To use a custom image, set `TELECODER_DOCKER_IMAGE` to your image name.
+This builds the Docker image that runs the coding agent. It includes Ubuntu 24.04, Node 22, Python 3.12, Go, and all three agents pre-installed (OpenCode, Claude Code, Codex CLI). `TELECODER_AGENT` controls which one runs as the primary agent; the others remain available as CLI tools the agent can invoke.
 
 ### 4. Run
 
