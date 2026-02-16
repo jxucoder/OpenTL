@@ -22,7 +22,7 @@ telecoder run "add rate limiting to /api/users" --repo myorg/myapp
 
 ## How It Works
 
-1. You send a task — via **CLI**, **Slack**, or **Telegram**
+1. You send a task — via **CLI**, **Slack**, **Telegram**, or **Web UI**
 2. TeleCoder spins up an **isolated Docker sandbox** with your repo
 3. A coding agent works on the task — [OpenCode](https://opencode.ai/), [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview), or [Codex](https://openai.com/index/codex/)
 4. Changes are committed, pushed, and a **PR is opened**
@@ -33,10 +33,11 @@ graph LR
     CLI["CLI"]
     Slack["Slack"]
     TG["Telegram"]
+    Web["Web UI"]
 
     subgraph server ["TeleCoder Server"]
         Engine["Engine"]
-        Pipeline["Pipeline\n(Plan→Code→Verify→Review)"]
+        Pipeline["Pipeline\n(Decompose→Plan→Code→Verify→Review)"]
         Sandbox["Docker Sandbox (Agent)"]
     end
 
@@ -45,6 +46,7 @@ graph LR
     CLI --> server
     Slack --> server
     TG --> server
+    Web --> server
     server --> GitHub
 ```
 
@@ -60,34 +62,6 @@ TeleCoder is built for teams that want the speed of AI coding without turning ev
 
 If you just want to run tasks and get PRs, use the CLI and defaults.
 If you want to build a custom coding-agent product, import TeleCoder as a Go library.
-
-## Multi-Agent Pipeline
-
-By default, TeleCoder uses a single agent for the coding stage (auto-detected from your API key). You can assign **different agents to different stages** for a multi-agent workflow:
-
-```bash
-export TELECODER_AGENT=claude-code              # default coding agent
-export TELECODER_RESEARCH_AGENT=opencode        # explore codebase before planning
-export TELECODER_REVIEW_AGENT=codex             # review the diff with a full agent
-```
-
-Or via the builder API:
-
-```go
-app, _ := telecoder.NewBuilder().
-    WithConfig(telecoder.Config{
-        ResearchAgent: &telecoder.AgentConfig{Name: "opencode"},
-        CodeAgent:     &telecoder.AgentConfig{Name: "claude-code"},
-        ReviewAgent:   &telecoder.AgentConfig{Name: "codex"},
-    }).
-    Build()
-```
-
-You can also override the agent per session via the API or CLI:
-
-```bash
-telecoder run "fix the bug" --repo myorg/myapp --agent claude-code
-```
 
 ## For Builders
 
@@ -161,11 +135,8 @@ cp .env.example .env
 | `TELECODER_DOCKER_IMAGE` | `telecoder-sandbox` | Sandbox Docker image name |
 | `TELECODER_MAX_REVISIONS` | `1` | Max review/revision rounds per sub-task |
 | `TELECODER_PLANNER_MODEL` | auto | Override the LLM model used for plan/review pipeline stages |
-| `TELECODER_AGENT` | `auto` | Default coding agent: `opencode`, `claude-code`, `codex`, or `auto` |
+| `TELECODER_AGENT` | `auto` | Coding agent: `opencode`, `claude-code`, `codex`, or `auto` |
 | `TELECODER_AGENT_MODEL` | auto | Override the model used by the in-sandbox coding agent |
-| `TELECODER_RESEARCH_AGENT` | — | Agent for codebase research before planning (e.g. `opencode`) |
-| `TELECODER_CODE_AGENT` | — | Override the coding-stage agent (e.g. `claude-code`) |
-| `TELECODER_REVIEW_AGENT` | — | Agent for code review instead of LLM-only review (e.g. `codex`) |
 | `TELECODER_SERVER` | `http://localhost:7080` | Server URL (used by the CLI when talking to a remote server) |
 
 For Slack, Telegram, and webhook configuration, see [docs/reference.md](docs/reference.md).
@@ -176,7 +147,7 @@ For Slack, Telegram, and webhook configuration, see [docs/reference.md](docs/ref
 make sandbox-image
 ```
 
-This builds the Docker image that runs the coding agent. It includes Ubuntu 24.04, Node 22, Python 3.12, Go, and pre-installed agents (OpenCode, Codex CLI).
+This builds the Docker image that runs the coding agent. It includes Ubuntu 24.04, Node 22, Python 3.12, Go, and pre-installed agents (OpenCode, Claude Code, Codex CLI).
 
 To use a custom image, set `TELECODER_DOCKER_IMAGE` to your image name.
 
@@ -195,8 +166,11 @@ telecoder list
 # Check a session's status
 telecoder status <session-id>
 
-# Stream logs
+# Stream logs in real time
 telecoder logs <session-id> --follow
+
+# Interactive config wizard
+telecoder config setup
 ```
 
 To point the CLI at a remote server:
@@ -225,6 +199,7 @@ make docker-up
 | [Slack Setup](docs/slack-setup.md) | Connect your Slack workspace |
 | [Telegram Setup](docs/telegram-setup.md) | Set up the Telegram bot |
 | [Reference](docs/reference.md) | Architecture, interfaces, API, config, structure, roadmap |
+| [User Stories](docs/user-stories.md) | Real-world use cases and extension scenarios |
 
 ## License
 

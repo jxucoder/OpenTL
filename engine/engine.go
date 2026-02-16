@@ -21,13 +21,6 @@ import (
 	"github.com/jxucoder/TeleCoder/store"
 )
 
-// AgentConfig configures a specific coding agent for a pipeline stage.
-type AgentConfig struct {
-	Name  string // "opencode", "claude-code", "codex", or custom
-	Image string // optional: override sandbox Docker image per agent
-	Model string // optional: override LLM model for this agent
-}
-
 // Config holds engine-specific configuration.
 type Config struct {
 	DockerImage     string
@@ -38,13 +31,9 @@ type Config struct {
 	ChatMaxMessages int
 	WebhookSecret   string
 
-	// Agent is the default coding agent ("opencode", "claude-code", "codex", "auto").
+	// Agent is the coding agent to run inside the sandbox.
+	// "opencode", "claude-code", "codex", or "auto" (default).
 	Agent string
-
-	// Per-stage agent overrides (nil = use pipeline LLM, not a sandbox agent).
-	ResearchAgent *AgentConfig
-	CodeAgent     *AgentConfig
-	ReviewAgent   *AgentConfig
 }
 
 // Engine orchestrates TeleCoder session lifecycle.
@@ -443,93 +432,17 @@ func (e *Engine) CreatePRFromChat(sessionID string) (string, int, error) {
 
 // --- Agent helpers ---
 
-// resolveAgentName returns the agent name to use for the coding stage.
-// It checks the per-session override first, then CodeAgent config, then the
-// default Agent config. Returns "" for "auto" (let entrypoint decide).
+// resolveAgentName returns the agent name for the sandbox.
+// Per-session override takes priority, then the global Agent config.
+// Returns "" for "auto" (let entrypoint decide based on API keys).
 func (e *Engine) resolveAgentName(sessionAgent string) string {
 	if sessionAgent != "" && sessionAgent != "auto" {
 		return sessionAgent
-	}
-	if e.config.CodeAgent != nil && e.config.CodeAgent.Name != "" {
-		return e.config.CodeAgent.Name
 	}
 	if e.config.Agent != "" && e.config.Agent != "auto" {
 		return e.config.Agent
 	}
 	return ""
-}
-
-// resolveAgentImage returns the Docker image to use for an agent config.
-// Falls back to the default DockerImage if the agent doesn't specify one.
-func (e *Engine) resolveAgentImage(ac *AgentConfig) string {
-	if ac != nil && ac.Image != "" {
-		return ac.Image
-	}
-	return e.config.DockerImage
-}
-
-// agentEnv builds extra environment variables for an agent config.
-func agentEnv(ac *AgentConfig, base []string) []string {
-	env := make([]string, len(base))
-	copy(env, base)
-	if ac == nil {
-		return env
-	}
-	if ac.Name != "" && ac.Name != "auto" {
-		env = append(env, "TELECODER_AGENT="+ac.Name)
-	}
-	if ac.Model != "" {
-		env = append(env, "TELECODER_AGENT_MODEL="+ac.Model)
-	}
-	return env
-}
-
-// runAgentStage starts a sandbox with the specified agent, passes a prompt,
-// collects the output, and stops the container. Used for research and
-// agent-based review stages.
-func (e *Engine) runAgentStage(ctx context.Context, sess *model.Session, ac AgentConfig, prompt string) (string, error) {
-	image := e.resolveAgentImage(&ac)
-	env := agentEnv(&ac, e.config.SandboxEnv)
-
-	containerID, err := e.sandbox.Start(ctx, sandbox.StartOptions{
-		SessionID: sess.ID,
-		Repo:      sess.Repo,
-		Prompt:    prompt,
-		Branch:    sess.Branch,
-		Image:     image,
-		Env:       env,
-		Network:   e.config.DockerNetwork,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to start agent stage sandbox: %w", err)
-	}
-	defer e.sandbox.Stop(ctx, containerID)
-
-	logStream, err := e.sandbox.StreamLogs(ctx, containerID)
-	if err != nil {
-		return "", fmt.Errorf("failed to stream agent stage logs: %w", err)
-	}
-	defer logStream.Close()
-
-	var output strings.Builder
-	for logStream.Scan() {
-		line := logStream.Text()
-		// Skip marker protocol lines from the output content.
-		if strings.HasPrefix(line, "###TELECODER_STATUS### ") ||
-			strings.HasPrefix(line, "###TELECODER_ERROR### ") ||
-			strings.HasPrefix(line, "###TELECODER_DONE### ") {
-			e.dispatchLogLine(sess.ID, line)
-			continue
-		}
-		output.WriteString(line)
-		output.WriteString("\n")
-	}
-
-	if _, err := e.sandbox.Wait(ctx, containerID); err != nil {
-		return output.String(), fmt.Errorf("error waiting for agent stage: %w", err)
-	}
-
-	return output.String(), nil
 }
 
 // --- Task session execution ---
@@ -553,32 +466,14 @@ func (e *Engine) runSession(sessionID string) {
 
 	var repoContext string
 
-	// Research stage: if a research agent is configured, use it to explore the
-	// codebase and produce richer context than the default IndexRepo scraping.
-	if e.config.ResearchAgent != nil {
-		e.emitEvent(sess.ID, "status", "Running research agent...")
-		researchPrompt := "Explore this codebase and produce a summary of architecture, key files, and patterns relevant to: " + sess.Prompt
-		researchOutput, err := e.runAgentStage(ctx, sess, *e.config.ResearchAgent, researchPrompt)
-		if err != nil {
-			log.Printf("Research agent failed (falling back to IndexRepo): %v", err)
-			e.emitEvent(sess.ID, "status", "Research agent failed, falling back to repo indexing")
-		} else if researchOutput != "" {
-			repoContext = researchOutput
-			e.emitEvent(sess.ID, "status", "Research complete")
-		}
-	}
-
-	// Fall back to IndexRepo if research agent didn't produce context.
-	if repoContext == "" {
-		e.emitEvent(sess.ID, "status", "Indexing repository...")
-		rc, err := e.git.IndexRepo(ctx, sess.Repo)
-		if err != nil {
-			log.Printf("Repo indexing failed (proceeding without context): %v", err)
-			e.emitEvent(sess.ID, "status", "Repo indexing failed, proceeding without context")
-		} else {
-			repoContext = ghImpl.FormatRepoContext(rc)
-			e.emitEvent(sess.ID, "status", "Repository indexed")
-		}
+	e.emitEvent(sess.ID, "status", "Indexing repository...")
+	rc, err := e.git.IndexRepo(ctx, sess.Repo)
+	if err != nil {
+		log.Printf("Repo indexing failed (proceeding without context): %v", err)
+		e.emitEvent(sess.ID, "status", "Repo indexing failed, proceeding without context")
+	} else {
+		repoContext = ghImpl.FormatRepoContext(rc)
+		e.emitEvent(sess.ID, "status", "Repository indexed")
 	}
 
 	var subTasks []pipeline.SubTask
@@ -715,72 +610,38 @@ func (e *Engine) runSubTask(ctx context.Context, sess *model.Session, taskPrompt
 			}
 		}
 
-		// Review: either agent-based or LLM-based.
-		if e.config.ReviewAgent != nil {
-			// Agent-based review: spin up a sandbox agent with the diff as context.
-			e.emitEvent(sess.ID, "status", "Running review agent...")
-			diff := e.getDiffFromContainer(ctx, result.containerID)
-			if diff == "" {
-				e.emitEvent(sess.ID, "status", "No diff found, skipping review")
-				break
-			}
-
-			reviewPrompt := fmt.Sprintf("Review this diff against the plan:\n\n## Plan\n%s\n\n## Diff\n%s\n\nIf the changes correctly implement the plan, respond with APPROVED. Otherwise, describe what needs to be fixed.", plan, diff)
-			feedback, err := e.runAgentStage(ctx, sess, *e.config.ReviewAgent, reviewPrompt)
-			if err != nil {
-				log.Printf("Review agent failed (proceeding): %v", err)
-				e.emitEvent(sess.ID, "status", "Review agent failed, proceeding")
-				break
-			}
-
-			approved := strings.Contains(strings.ToUpper(feedback), "APPROVED")
-			if approved {
-				e.emitEvent(sess.ID, "output", "## Review\n"+feedback)
-				break
-			}
-
-			e.emitEvent(sess.ID, "output", "## Review Feedback\n"+feedback)
-
-			if round >= maxRounds {
-				e.emitEvent(sess.ID, "status", fmt.Sprintf("Max revision rounds (%d) reached, proceeding", maxRounds))
-				break
-			}
-
-			prompt = pipeline.RevisePrompt(taskPrompt, plan, feedback)
-		} else {
-			// LLM-based review (existing behavior).
-			if e.review == nil || plan == "" {
-				break
-			}
-
-			e.emitEvent(sess.ID, "status", "Reviewing changes...")
-			diff := e.getDiffFromContainer(ctx, result.containerID)
-			if diff == "" {
-				e.emitEvent(sess.ID, "status", "No diff found, skipping review")
-				break
-			}
-
-			review, err := e.review.Review(ctx, taskPrompt, plan, diff)
-			if err != nil {
-				log.Printf("Review failed (proceeding): %v", err)
-				e.emitEvent(sess.ID, "status", "Review failed, proceeding")
-				break
-			}
-
-			if review.Approved {
-				e.emitEvent(sess.ID, "output", "## Review\n"+review.Feedback)
-				break
-			}
-
-			e.emitEvent(sess.ID, "output", "## Review Feedback\n"+review.Feedback)
-
-			if round >= maxRounds {
-				e.emitEvent(sess.ID, "status", fmt.Sprintf("Max revision rounds (%d) reached, proceeding", maxRounds))
-				break
-			}
-
-			prompt = pipeline.RevisePrompt(taskPrompt, plan, review.Feedback)
+		// Review the changes via LLM.
+		if e.review == nil || plan == "" {
+			break
 		}
+
+		e.emitEvent(sess.ID, "status", "Reviewing changes...")
+		diff := e.getDiffFromContainer(ctx, result.containerID)
+		if diff == "" {
+			e.emitEvent(sess.ID, "status", "No diff found, skipping review")
+			break
+		}
+
+		review, err := e.review.Review(ctx, taskPrompt, plan, diff)
+		if err != nil {
+			log.Printf("Review failed (proceeding): %v", err)
+			e.emitEvent(sess.ID, "status", "Review failed, proceeding")
+			break
+		}
+
+		if review.Approved {
+			e.emitEvent(sess.ID, "output", "## Review\n"+review.Feedback)
+			break
+		}
+
+		e.emitEvent(sess.ID, "output", "## Review Feedback\n"+review.Feedback)
+
+		if round >= maxRounds {
+			e.emitEvent(sess.ID, "status", fmt.Sprintf("Max revision rounds (%d) reached, proceeding", maxRounds))
+			break
+		}
+
+		prompt = pipeline.RevisePrompt(taskPrompt, plan, review.Feedback)
 	}
 
 	return lastContainerID, nil
@@ -801,21 +662,13 @@ func (e *Engine) runSandboxRoundWithAgent(ctx context.Context, sess *model.Sessi
 	if agentName != "" {
 		sandboxEnv = append(sandboxEnv, "TELECODER_AGENT="+agentName)
 	}
-	if e.config.CodeAgent != nil && e.config.CodeAgent.Model != "" {
-		sandboxEnv = append(sandboxEnv, "TELECODER_AGENT_MODEL="+e.config.CodeAgent.Model)
-	}
-
-	image := e.config.DockerImage
-	if e.config.CodeAgent != nil && e.config.CodeAgent.Image != "" {
-		image = e.config.CodeAgent.Image
-	}
 
 	containerID, err := e.sandbox.Start(ctx, sandbox.StartOptions{
 		SessionID: sess.ID,
 		Repo:      sess.Repo,
 		Prompt:    prompt,
 		Branch:    sess.Branch,
-		Image:     image,
+		Image:     e.config.DockerImage,
 		Env:       sandboxEnv,
 		Network:   e.config.DockerNetwork,
 	})

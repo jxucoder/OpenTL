@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -264,21 +263,9 @@ func TestEngineStartAndStop(t *testing.T) {
 func TestResolveAgentName_SessionOverride(t *testing.T) {
 	eng, _, _ := testEngine(t)
 
-	// Per-session agent should take priority.
 	got := eng.resolveAgentName("claude-code")
 	if got != "claude-code" {
 		t.Fatalf("expected 'claude-code', got %q", got)
-	}
-}
-
-func TestResolveAgentName_CodeAgentConfig(t *testing.T) {
-	eng, _, _ := testEngine(t)
-	eng.config.CodeAgent = &AgentConfig{Name: "codex"}
-
-	// No session override → falls back to CodeAgent config.
-	got := eng.resolveAgentName("")
-	if got != "codex" {
-		t.Fatalf("expected 'codex', got %q", got)
 	}
 }
 
@@ -298,118 +285,29 @@ func TestResolveAgentName_AutoReturnsEmpty(t *testing.T) {
 
 	got := eng.resolveAgentName("")
 	if got != "" {
-		t.Fatalf("expected empty string for auto, got %q", got)
+		t.Fatalf("expected empty for auto, got %q", got)
 	}
 
-	// "auto" as session override should also return empty.
 	got = eng.resolveAgentName("auto")
 	if got != "" {
-		t.Fatalf("expected empty string for session auto, got %q", got)
+		t.Fatalf("expected empty for session auto, got %q", got)
 	}
 }
 
-func TestResolveAgentName_Priority(t *testing.T) {
+func TestResolveAgentName_SessionOverridesDefault(t *testing.T) {
 	eng, _, _ := testEngine(t)
 	eng.config.Agent = "opencode"
-	eng.config.CodeAgent = &AgentConfig{Name: "codex"}
 
-	// Session override > CodeAgent > Agent.
+	// Session override takes priority.
 	got := eng.resolveAgentName("claude-code")
 	if got != "claude-code" {
-		t.Fatalf("expected session override 'claude-code', got %q", got)
+		t.Fatalf("expected 'claude-code', got %q", got)
 	}
 
-	// No session override: CodeAgent > Agent.
-	got = eng.resolveAgentName("")
-	if got != "codex" {
-		t.Fatalf("expected CodeAgent 'codex', got %q", got)
-	}
-
-	// Remove CodeAgent: falls through to Agent.
-	eng.config.CodeAgent = nil
+	// No session override: falls through to default.
 	got = eng.resolveAgentName("")
 	if got != "opencode" {
-		t.Fatalf("expected default Agent 'opencode', got %q", got)
-	}
-}
-
-func TestResolveAgentImage_Override(t *testing.T) {
-	eng, _, _ := testEngine(t)
-
-	// No agent config: uses default image.
-	got := eng.resolveAgentImage(nil)
-	if got != "test-image" {
-		t.Fatalf("expected default 'test-image', got %q", got)
-	}
-
-	// Agent config without image: uses default.
-	got = eng.resolveAgentImage(&AgentConfig{Name: "codex"})
-	if got != "test-image" {
-		t.Fatalf("expected default 'test-image', got %q", got)
-	}
-
-	// Agent config with image: uses override.
-	got = eng.resolveAgentImage(&AgentConfig{Name: "codex", Image: "custom-image"})
-	if got != "custom-image" {
-		t.Fatalf("expected 'custom-image', got %q", got)
-	}
-}
-
-func TestAgentEnv(t *testing.T) {
-	base := []string{"GITHUB_TOKEN=abc", "ANTHROPIC_API_KEY=xyz"}
-
-	// Nil agent config: returns copy of base.
-	env := agentEnv(nil, base)
-	if len(env) != 2 {
-		t.Fatalf("expected 2 env vars, got %d", len(env))
-	}
-
-	// Agent config with name and model.
-	ac := &AgentConfig{Name: "claude-code", Model: "claude-sonnet-4-20250514"}
-	env = agentEnv(ac, base)
-	if len(env) != 4 {
-		t.Fatalf("expected 4 env vars, got %d", len(env))
-	}
-	foundAgent := false
-	foundModel := false
-	for _, e := range env {
-		if e == "TELECODER_AGENT=claude-code" {
-			foundAgent = true
-		}
-		if e == "TELECODER_AGENT_MODEL=claude-sonnet-4-20250514" {
-			foundModel = true
-		}
-	}
-	if !foundAgent {
-		t.Fatal("expected TELECODER_AGENT=claude-code in env")
-	}
-	if !foundModel {
-		t.Fatal("expected TELECODER_AGENT_MODEL in env")
-	}
-
-	// Auto agent name should not be added.
-	ac = &AgentConfig{Name: "auto"}
-	env = agentEnv(ac, base)
-	for _, e := range env {
-		if strings.HasPrefix(e, "TELECODER_AGENT=") {
-			t.Fatalf("auto agent should not add TELECODER_AGENT, got %q", e)
-		}
-	}
-}
-
-func TestAgentEnv_DoesNotMutateBase(t *testing.T) {
-	base := []string{"GITHUB_TOKEN=abc"}
-	ac := &AgentConfig{Name: "opencode", Model: "custom-model"}
-
-	env := agentEnv(ac, base)
-
-	// env should have more entries than base.
-	if len(env) != 3 {
-		t.Fatalf("expected 3 env vars, got %d", len(env))
-	}
-	// base should be unchanged.
-	if len(base) != 1 {
-		t.Fatalf("base was mutated: expected 1, got %d", len(base))
+		t.Fatalf("expected 'opencode', got %q", got)
 	}
 }
 
@@ -424,7 +322,6 @@ func TestCreateAndRunSessionWithAgent(t *testing.T) {
 		t.Fatalf("expected agent 'claude-code', got %q", sess.Agent)
 	}
 
-	// Verify session is persisted with the agent field.
 	got, err := eng.Store().GetSession(sess.ID)
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
@@ -433,40 +330,9 @@ func TestCreateAndRunSessionWithAgent(t *testing.T) {
 		t.Fatalf("expected persisted agent 'claude-code', got %q", got.Agent)
 	}
 
-	// Wait for the background goroutine to start the sandbox.
 	time.Sleep(200 * time.Millisecond)
-
 	if sb.startCalls < 1 {
 		t.Fatalf("expected sandbox Start to be called, got %d calls", sb.startCalls)
-	}
-}
-
-func TestRunAgentStage(t *testing.T) {
-	eng, sb, _ := testEngine(t)
-
-	sess := &model.Session{
-		ID:     "test-agent-stage",
-		Repo:   "owner/repo",
-		Branch: "telecoder/test",
-	}
-	if err := eng.store.CreateSession(sess); err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-
-	ctx := context.Background()
-	ac := AgentConfig{Name: "opencode", Image: "custom-research-image"}
-
-	output, err := eng.runAgentStage(ctx, sess, ac, "explore the codebase")
-	if err != nil {
-		t.Fatalf("runAgentStage: %v", err)
-	}
-
-	// Stub returns empty output, but the call should succeed.
-	_ = output
-
-	// Sandbox Start should have been called (for the agent stage container).
-	if sb.startCalls < 1 {
-		t.Fatal("expected sandbox Start to be called for agent stage")
 	}
 }
 
@@ -479,8 +345,6 @@ func TestRunSandboxRoundWithAgent_PassesAgentEnv(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 
 	bus := eventbus.NewInMemoryBus()
-
-	// Use a capturing sandbox that records start options.
 	capSb := &capturingStubSandbox{}
 	git := &stubGitProvider{}
 	llmClient := &stubLLM{}
@@ -492,7 +356,7 @@ func TestRunSandboxRoundWithAgent_PassesAgentEnv(t *testing.T) {
 			ChatIdleTimeout: 30 * time.Minute,
 			ChatMaxMessages: 50,
 			SandboxEnv:      []string{"GITHUB_TOKEN=abc"},
-			CodeAgent:       &AgentConfig{Name: "claude-code", Model: "claude-sonnet-4-20250514"},
+			Agent:           "claude-code",
 		},
 		st, bus, capSb, git,
 		pipeline.NewPlanStage(llmClient, ""),
@@ -517,111 +381,20 @@ func TestRunSandboxRoundWithAgent_PassesAgentEnv(t *testing.T) {
 		t.Fatalf("runSandboxRoundWithAgent: %v", err)
 	}
 
-	// Verify the sandbox was started with the correct agent env.
 	if capSb.lastOpts == nil {
 		t.Fatal("expected sandbox Start to be called")
 	}
 
 	foundAgent := false
-	foundModel := false
 	for _, e := range capSb.lastOpts.Env {
 		if e == "TELECODER_AGENT=claude-code" {
 			foundAgent = true
-		}
-		if e == "TELECODER_AGENT_MODEL=claude-sonnet-4-20250514" {
-			foundModel = true
 		}
 	}
 	if !foundAgent {
 		t.Fatalf("expected TELECODER_AGENT=claude-code in sandbox env, got %v", capSb.lastOpts.Env)
 	}
-	if !foundModel {
-		t.Fatalf("expected TELECODER_AGENT_MODEL=claude-sonnet-4-20250514 in sandbox env, got %v", capSb.lastOpts.Env)
-	}
 }
-
-func TestResearchAgentRunsBeforeDecompose(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	st, err := sqliteStore.New(dbPath)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	bus := eventbus.NewInMemoryBus()
-	recSb := &recordingStubSandbox{}
-	git := &stubGitProvider{}
-	llmClient := &stubLLM{}
-
-	eng := New(
-		Config{
-			DockerImage:     "test-image",
-			MaxRevisions:    0,
-			ChatIdleTimeout: 30 * time.Minute,
-			ChatMaxMessages: 50,
-			ResearchAgent:   &AgentConfig{Name: "opencode", Image: "research-image"},
-		},
-		st, bus, recSb, git,
-		pipeline.NewPlanStage(llmClient, ""),
-		pipeline.NewReviewStage(llmClient, ""),
-		pipeline.NewDecomposeStage(llmClient, ""),
-		pipeline.NewVerifyStage(llmClient, ""),
-	)
-
-	sess, err := eng.CreateAndRunSession("owner/repo", "add rate limiting")
-	if err != nil {
-		t.Fatalf("CreateAndRunSession: %v", err)
-	}
-
-	// Wait for the background goroutine to complete.
-	time.Sleep(500 * time.Millisecond)
-
-	// Verify the sandbox was started at least twice:
-	// once for the research agent, once for the coding stage.
-	if recSb.startCount < 2 {
-		t.Fatalf("expected at least 2 sandbox Start calls (research + code), got %d", recSb.startCount)
-	}
-
-	// The first Start call should use the research image.
-	if len(recSb.allOpts) < 2 {
-		t.Fatalf("expected at least 2 start options recorded, got %d", len(recSb.allOpts))
-	}
-	if recSb.allOpts[0].Image != "research-image" {
-		t.Fatalf("expected first sandbox Start to use research image, got %q", recSb.allOpts[0].Image)
-	}
-
-	// The research prompt should mention "Explore this codebase".
-	if !strings.Contains(recSb.allOpts[0].Prompt, "Explore this codebase") {
-		t.Fatalf("expected research prompt, got %q", recSb.allOpts[0].Prompt)
-	}
-
-	_ = sess
-}
-
-func TestReviewAgentParseApproval(t *testing.T) {
-	// Verify the APPROVED keyword parsing logic used in runSubTask.
-	// This is inline in the engine, so we test the string matching directly.
-	tests := []struct {
-		feedback string
-		approved bool
-	}{
-		{"APPROVED - looks good", true},
-		{"The changes are approved and ready to merge", true},
-		{"APPROVED", true},
-		{"Needs changes: the error handling is missing", false},
-		{"Changes look great. APPROVED.", true},
-		{"Please fix the null pointer dereference on line 42", false},
-	}
-
-	for _, tt := range tests {
-		got := strings.Contains(strings.ToUpper(tt.feedback), "APPROVED")
-		if got != tt.approved {
-			t.Errorf("feedback=%q: expected approved=%v, got %v", tt.feedback, tt.approved, got)
-		}
-	}
-}
-
-// --- Recording stubs ---
 
 // capturingStubSandbox records the StartOptions from the last Start call.
 type capturingStubSandbox struct {
@@ -640,23 +413,3 @@ func (s *capturingStubSandbox) ExecCollect(_ context.Context, _ string, _ []stri
 func (s *capturingStubSandbox) CommitAndPush(_ context.Context, _, _, _ string) error               { return nil }
 func (s *capturingStubSandbox) EnsureNetwork(_ context.Context, _ string) error                     { return nil }
 func (s *capturingStubSandbox) IsRunning(_ context.Context, _ string) bool                          { return true }
-
-// recordingStubSandbox records all Start calls for multi-stage verification.
-type recordingStubSandbox struct {
-	startCount int
-	allOpts    []sandbox.StartOptions
-}
-
-func (s *recordingStubSandbox) Start(_ context.Context, opts sandbox.StartOptions) (string, error) {
-	s.startCount++
-	s.allOpts = append(s.allOpts, opts)
-	return fmt.Sprintf("rec-container-%d", s.startCount), nil
-}
-func (s *recordingStubSandbox) Stop(_ context.Context, _ string) error                             { return nil }
-func (s *recordingStubSandbox) Wait(_ context.Context, _ string) (int, error)                      { return 0, nil }
-func (s *recordingStubSandbox) StreamLogs(_ context.Context, _ string) (sandbox.LineScanner, error) { return &stubScanner{}, nil }
-func (s *recordingStubSandbox) Exec(_ context.Context, _ string, _ []string) (sandbox.LineScanner, error) { return &stubScanner{}, nil }
-func (s *recordingStubSandbox) ExecCollect(_ context.Context, _ string, _ []string) (string, error) { return "", nil }
-func (s *recordingStubSandbox) CommitAndPush(_ context.Context, _, _, _ string) error               { return nil }
-func (s *recordingStubSandbox) EnsureNetwork(_ context.Context, _ string) error                     { return nil }
-func (s *recordingStubSandbox) IsRunning(_ context.Context, _ string) bool                          { return true }

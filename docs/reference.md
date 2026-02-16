@@ -72,57 +72,6 @@ TeleCoder is a single binary: `telecoderserve` runs the server, and `telecoderru
 | **CLI** | `cmd/telecoder/` | Reference implementation. Creates sessions, streams logs, checks status. |
 | **Web UI** | `web/` | React + Vite dashboard for monitoring sessions. |
 
-## Multi-Agent Pipeline
-
-TeleCoder supports assigning different coding agents to different pipeline stages. This lets you compose workflows like "OpenCode for research, Claude Code for coding, Codex for review."
-
-### Agent Selection
-
-Each stage can use a different agent:
-
-| Stage | Config Field | Env Var | Behavior |
-|:------|:-------------|:--------|:---------|
-| **Research** | `ResearchAgent` | `TELECODER_RESEARCH_AGENT` | Spins up a sandbox agent to explore the codebase before planning. Falls back to `IndexRepo` file-tree scraping if unset. |
-| **Code** | `CodeAgent` / `Agent` | `TELECODER_CODE_AGENT` / `TELECODER_AGENT` | The main coding agent. Defaults to `auto` (Anthropic key → OpenCode, OpenAI key → Codex). |
-| **Review** | `ReviewAgent` | `TELECODER_REVIEW_AGENT` | Spins up a sandbox agent with the diff as context. Falls back to LLM-only review if unset. |
-
-### Per-Session Override
-
-The `POST /api/sessions` endpoint accepts an optional `agent` field that overrides the default coding agent for that session only:
-
-```json
-{"repo": "owner/repo", "prompt": "fix the bug", "agent": "claude-code"}
-```
-
-The CLI exposes this via the `--agent` / `-a` flag:
-
-```bash
-telecoder run "fix the bug" --repo myorg/myapp --agent claude-code
-```
-
-### Builder API
-
-```go
-app, _ := telecoder.NewBuilder().
-    WithConfig(telecoder.Config{
-        Agent:         "claude-code",
-        ResearchAgent: &telecoder.AgentConfig{Name: "opencode"},
-        CodeAgent:     &telecoder.AgentConfig{Name: "claude-code", Model: "claude-sonnet-4-20250514"},
-        ReviewAgent:   &telecoder.AgentConfig{Name: "codex"},
-    }).
-    Build()
-```
-
-Each `AgentConfig` supports `Name`, `Image` (override Docker image), and `Model` (override LLM model).
-
-### Available Agents
-
-| Agent | Name | Requires | Description |
-|:------|:-----|:---------|:------------|
-| [OpenCode](https://opencode.ai/) | `opencode` | `ANTHROPIC_API_KEY` | AI coding agent (npm package) |
-| [Claude Code](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/overview) | `claude-code` | `ANTHROPIC_API_KEY` | Anthropic's CLI coding agent |
-| [Codex CLI](https://openai.com/index/codex/) | `codex` | `OPENAI_API_KEY` | OpenAI's coding agent |
-
 ## API Endpoints
 
 | Method | Endpoint | Description |
@@ -154,11 +103,8 @@ All configuration is via environment variables.
 | `TELECODER_CHAT_IDLE_TIMEOUT` | No | `30m` | Idle timeout for persistent chat sandboxes |
 | `TELECODER_CHAT_MAX_MESSAGES` | No | `50` | Max user messages per chat session |
 | `TELECODER_PLANNER_MODEL` | No | — | Override LLM model for pipeline stages |
-| `TELECODER_AGENT` | No | `auto` | Default coding agent: `opencode`, `claude-code`, `codex`, or `auto` |
+| `TELECODER_AGENT` | No | `auto` | Coding agent: `opencode`, `claude-code`, `codex`, or `auto` |
 | `TELECODER_AGENT_MODEL` | No | — | Override the LLM model used by the in-sandbox coding agent |
-| `TELECODER_RESEARCH_AGENT` | No | — | Agent for codebase research before planning (e.g. `opencode`) |
-| `TELECODER_CODE_AGENT` | No | — | Override the coding-stage agent (e.g. `claude-code`) |
-| `TELECODER_REVIEW_AGENT` | No | — | Agent for code review instead of LLM-only review (e.g. `codex`) |
 | `TELECODER_SERVER` | No | `http://localhost:7080` | Server URL (for CLI) |
 
 ## Project Structure
@@ -229,11 +175,8 @@ TeleCoder/
 - [x] Sandbox pre-warming pool for near-instant startup
 - [x] Remote sandbox provider — run sandboxes on a VPS or cloud Docker host via SSH
 
-### Phase 5 - Multi-Agent Pipeline
+### Phase 5 - Agent Selection
 
-- [x] Per-stage agent selection (research, code, review)
 - [x] Claude Code support in sandbox image
-- [x] `TELECODER_AGENT` explicit agent selection in entrypoint
-- [x] Agent-based research stage (replaces IndexRepo scraping)
-- [x] Agent-based review stage (replaces LLM-only review)
-- [x] Per-session agent override via API and CLI
+- [x] `TELECODER_AGENT` explicit agent selection in entrypoint (`opencode`, `claude-code`, `codex`, `auto`)
+- [x] Per-session agent override via API and CLI (`--agent` flag)

@@ -446,67 +446,6 @@ func TestE2E_AgentOverrideReachesSandbox(t *testing.T) {
 	t.Log("Agent override claude-code reached sandbox env")
 }
 
-// TestE2E_MultiAgentResearchThenCode verifies the multi-agent pipeline:
-// research agent (opencode) runs first with research image, then coding
-// agent (claude-code) runs with the default image.
-func TestE2E_MultiAgentResearchThenCode(t *testing.T) {
-	h := setupE2E(t, engine.Config{
-		SandboxEnv:    []string{"GITHUB_TOKEN=fake"},
-		ResearchAgent: &engine.AgentConfig{Name: "opencode", Image: "research-img"},
-		CodeAgent:     &engine.AgentConfig{Name: "claude-code"},
-	})
-
-	w := h.do("POST", "/api/sessions", `{"repo":"myorg/myapp","prompt":"refactor auth module"}`)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-	var created struct{ ID string }
-	json.NewDecoder(w.Body).Decode(&created)
-
-	sess := h.waitForSession(t, created.ID, 10*time.Second)
-	if sess.Status != model.StatusComplete {
-		t.Fatalf("session failed: %s", sess.Error)
-	}
-
-	starts := h.sb.getStarts()
-	if len(starts) < 2 {
-		t.Fatalf("expected >= 2 sandbox starts (research + code), got %d", len(starts))
-	}
-
-	// First start = research agent.
-	r := starts[0]
-	if r.Image != "research-img" {
-		t.Fatalf("expected research image 'research-img', got %q", r.Image)
-	}
-	if !strings.Contains(r.Prompt, "Explore this codebase") {
-		t.Fatalf("expected research prompt, got %q", r.Prompt)
-	}
-	hasResearchAgent := false
-	for _, env := range r.Env {
-		if env == "TELECODER_AGENT=opencode" {
-			hasResearchAgent = true
-		}
-	}
-	if !hasResearchAgent {
-		t.Fatalf("expected TELECODER_AGENT=opencode in research env, got %v", r.Env)
-	}
-	t.Logf("Research stage: image=%s, prompt=%q", r.Image, truncate(r.Prompt, 60))
-
-	// Last start = coding agent.
-	c := starts[len(starts)-1]
-	hasCodingAgent := false
-	for _, env := range c.Env {
-		if env == "TELECODER_AGENT=claude-code" {
-			hasCodingAgent = true
-		}
-	}
-	if !hasCodingAgent {
-		t.Fatalf("expected TELECODER_AGENT=claude-code in coding env, got %v", c.Env)
-	}
-	t.Logf("Coding stage: image=%s", c.Image)
-	t.Logf("Multi-agent pipeline: research(opencode) → code(claude-code) verified")
-}
-
 // TestE2E_SessionNotFound verifies 404 for non-existent sessions.
 func TestE2E_SessionNotFound(t *testing.T) {
 	h := setupE2E(t, engine.Config{})
@@ -532,4 +471,3 @@ func TestE2E_HealthCheck(t *testing.T) {
 
 // Compile-time check that top-level types are referenced.
 var _ = telecoder.Config{}
-var _ = telecoder.AgentConfig{}

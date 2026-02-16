@@ -31,18 +31,6 @@ import (
 	"github.com/jxucoder/TeleCoder/store"
 )
 
-// AgentConfig configures a specific coding agent for a pipeline stage.
-type AgentConfig struct {
-	// Name is the agent identifier: "opencode", "claude-code", "codex", or custom.
-	Name string
-
-	// Image optionally overrides the sandbox Docker image for this agent.
-	Image string
-
-	// Model optionally overrides the LLM model for this agent.
-	Model string
-}
-
 // Config holds top-level configuration for a TeleCoder application.
 type Config struct {
 	// ServerAddr is the address the HTTP server listens on (default ":7080").
@@ -75,20 +63,10 @@ type Config struct {
 	// WebhookSecret is the GitHub webhook HMAC secret.
 	WebhookSecret string
 
-	// Agent is the default coding agent (used when stage-specific agents aren't set).
+	// Agent is the coding agent to run inside the sandbox.
 	// Valid values: "opencode", "claude-code", "codex", "auto" (default).
+	// "auto" selects based on API keys: ANTHROPIC_API_KEY → OpenCode, OPENAI_API_KEY → Codex.
 	Agent string
-
-	// ResearchAgent optionally configures an agent for research/exploration before planning.
-	// If nil, the existing IndexRepo-based context gathering is used.
-	ResearchAgent *AgentConfig
-
-	// CodeAgent optionally overrides the main coding agent (defaults to Agent).
-	CodeAgent *AgentConfig
-
-	// ReviewAgent optionally configures an agent for code review (replaces LLM-only review).
-	// If nil, the existing LLM-based review pipeline stage is used.
-	ReviewAgent *AgentConfig
 }
 
 // Builder constructs a TeleCoder App.
@@ -174,30 +152,6 @@ func (b *Builder) Build() (*App, error) {
 		return nil, err
 	}
 
-	// Convert top-level AgentConfig to engine AgentConfig.
-	var researchAgent, codeAgent, reviewAgent *engine.AgentConfig
-	if b.config.ResearchAgent != nil {
-		researchAgent = &engine.AgentConfig{
-			Name:  b.config.ResearchAgent.Name,
-			Image: b.config.ResearchAgent.Image,
-			Model: b.config.ResearchAgent.Model,
-		}
-	}
-	if b.config.CodeAgent != nil {
-		codeAgent = &engine.AgentConfig{
-			Name:  b.config.CodeAgent.Name,
-			Image: b.config.CodeAgent.Image,
-			Model: b.config.CodeAgent.Model,
-		}
-	}
-	if b.config.ReviewAgent != nil {
-		reviewAgent = &engine.AgentConfig{
-			Name:  b.config.ReviewAgent.Name,
-			Image: b.config.ReviewAgent.Image,
-			Model: b.config.ReviewAgent.Model,
-		}
-	}
-
 	eng := engine.New(
 		engine.Config{
 			DockerImage:     b.config.DockerImage,
@@ -208,9 +162,6 @@ func (b *Builder) Build() (*App, error) {
 			ChatMaxMessages: b.config.ChatMaxMessages,
 			WebhookSecret:   b.config.WebhookSecret,
 			Agent:           b.config.Agent,
-			ResearchAgent:   researchAgent,
-			CodeAgent:       codeAgent,
-			ReviewAgent:     reviewAgent,
 		},
 		b.store,
 		b.bus,

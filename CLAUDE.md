@@ -123,9 +123,9 @@ channel/                  # Channel interface
 channel/slack/            # Slack bot (Socket Mode)
 channel/telegram/         # Telegram bot (long polling)
 
-cmd/telecoder/            # Reference CLI (Cobra): serve, run, list, status, config
+cmd/telecoder/            # Reference CLI (Cobra): serve, run, list, status, logs, config
 web/                      # React + Vite + Tailwind web UI
-docs/                     # Documentation (getting-started, deploy, slack/telegram setup, reference)
+docs/                     # Documentation (getting-started, deploy, slack/telegram setup, reference, user-stories)
 _examples/minimal/        # Minimal framework usage example
 ```
 
@@ -133,9 +133,9 @@ _examples/minimal/        # Minimal framework usage example
 
 ### Key Packages
 
-- **`telecoder.go`** — Builder pattern entry point. `NewBuilder().Build()` wires all components. Config struct holds ServerAddr, DataDir, DatabasePath, DockerImage, DockerNetwork, SandboxEnv, MaxRevisions, ChatIdleTimeout, ChatMaxMessages, WebhookSecret, Agent, ResearchAgent, CodeAgent, ReviewAgent. `AgentConfig` type holds Name, Image, Model for per-stage agent configuration.
+- **`telecoder.go`** — Builder pattern entry point. `NewBuilder().Build()` wires all components. Config struct holds ServerAddr, DataDir, DatabasePath, DockerImage, DockerNetwork, SandboxEnv, MaxRevisions, ChatIdleTimeout, ChatMaxMessages, WebhookSecret, Agent.
 - **`defaults.go`** — Auto-detects LLM keys (prioritizes Anthropic over OpenAI), creates default store/bus/sandbox/pipeline stages including verify.
-- **`engine/`** — Session orchestration: CreateAndRunSession, CreateAndRunSessionWithAgent, CreateChatSession, SendChatMessage, CreatePRFromChat, CreatePRCommentSession, sandbox lifecycle, decompose→plan→code→verify→review loops with revision rounds. Multi-agent support: `runAgentStage()` starts a sandbox with a specific agent for research/review stages, `resolveAgentName()` resolves per-session agent overrides, `agentEnv()` builds sandbox env vars.
+- **`engine/`** — Session orchestration: CreateAndRunSession, CreateAndRunSessionWithAgent, CreateChatSession, SendChatMessage, CreatePRFromChat, CreatePRCommentSession, sandbox lifecycle, decompose→plan→code→verify→review loops with revision rounds. `resolveAgentName()` resolves per-session agent overrides.
 - **`httpapi/`** — HTTP API handler using Chi router, delegates all logic to engine. Includes GitHub webhook handler.
 - **`pipeline/`** — LLM pipeline stages:
   - **PlanStage** — Generates structured plan from task + codebase context
@@ -152,8 +152,8 @@ _examples/minimal/        # Minimal framework usage example
 - **`eventbus/`** — In-memory pub/sub for real-time SSE events. Non-blocking publish.
 - **`channel/slack/`** — Slack bot (Socket Mode). Listens for DMs and slash commands.
 - **`channel/telegram/`** — Telegram bot (long polling). Commands: /start, /chat, /run, /status, /pr. Supports multi-turn chat sessions.
-- **`cmd/telecoder/`** — Reference CLI using Cobra. Commands: `serve`, `run`, `list`, `status`, `config`.
-- **`web/`** — React + Vite + Tailwind web UI for session monitoring.
+- **`cmd/telecoder/`** — Reference CLI using Cobra. Commands: `serve`, `run`, `list`, `status`, `logs` (with `--follow`), `config` (subcommands: `setup`, `set`, `show`, `path`).
+- **`web/`** — React 19 + Vite 6 + Tailwind CSS 3.4 web UI for session monitoring. SSE event streaming support.
 
 ### Docker Sandbox
 
@@ -164,7 +164,7 @@ The sandbox image (`docker/base.Dockerfile`) is Ubuntu 24.04 with Node 22, Pytho
 3. Configures git identity
 4. Creates feature branch
 5. Auto-detects and installs dependencies (npm/pnpm/yarn/pip/go)
-6. **Agent selection:** `TELECODER_AGENT` explicitly selects the agent (`opencode`, `claude-code`, `codex`). `auto` (default) falls back to API-key-based detection: ANTHROPIC_API_KEY → OpenCode, OPENAI_API_KEY → Codex CLI. Supports optional `TELECODER_AGENT_MODEL` override.
+6. **Agent selection:** `TELECODER_AGENT` selects the agent (`opencode`, `claude-code`, `codex`). `auto` (default) falls back to API-key-based detection: ANTHROPIC_API_KEY → OpenCode, OPENAI_API_KEY → Codex CLI. Optional `TELECODER_AGENT_MODEL` overrides the model.
 7. Commits, pushes, and signals completion
 
 Communication with the server uses marker-based protocols in stdout:
@@ -195,11 +195,8 @@ Key optional vars:
 - `TELECODER_CHAT_IDLE_TIMEOUT` — Chat inactivity timeout (default `30m`)
 - `TELECODER_CHAT_MAX_MESSAGES` — Max user messages per chat (default `50`)
 - `TELECODER_PLANNER_MODEL` — Override LLM model for planning stages
-- `TELECODER_AGENT` — Default coding agent: `opencode`, `claude-code`, `codex`, `auto` (default)
+- `TELECODER_AGENT` — Coding agent: `opencode`, `claude-code`, `codex`, `auto` (default)
 - `TELECODER_AGENT_MODEL` — Override agent model inside sandbox
-- `TELECODER_RESEARCH_AGENT` — Agent for codebase research before planning (e.g. `opencode`)
-- `TELECODER_CODE_AGENT` — Override the coding-stage agent (e.g. `claude-code`)
-- `TELECODER_REVIEW_AGENT` — Agent for code review instead of LLM-only review (e.g. `codex`)
 - `GITHUB_WEBHOOK_SECRET` — HMAC secret for webhook verification
 - `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN` — Slack integration
 - `SLACK_DEFAULT_REPO` — Default repo for Slack commands
@@ -214,7 +211,9 @@ Config file: `~/.telecoder/config.env` (loaded by `serve` command).
 - Pipeline tests use fake LLM clients (`fakeLLM`) that return canned responses
 - Sandbox pool tests use a mock Runtime to verify pre-warming, claiming, and refilling behavior
 - Engine tests use stubs for sandbox, git, and LLM to verify session lifecycle, agent selection, and event dispatch
-- Test files: `pipeline/pipeline_test.go`, `store/sqlite/sqlite_test.go`, `eventbus/eventbus_test.go`, `sandbox/pool_test.go`, `engine/engine_test.go`
+- HTTP API tests use stub implementations for engine dependencies to test request validation, routing, and response formatting
+- E2E tests wire up a real HTTP router, SQLite store, event bus, and simulated sandbox/git provider to test full session lifecycle
+- Test files: `e2e_test.go`, `pipeline/pipeline_test.go`, `store/sqlite/sqlite_test.go`, `eventbus/eventbus_test.go`, `sandbox/pool_test.go`, `engine/engine_test.go`, `httpapi/httpapi_test.go`, `model/model_test.go`
 
 ## API Endpoints
 
