@@ -15,7 +15,7 @@ Send a task. Get a PR.
 ---
 
 ```
-telecoderrun "add rate limiting to /api/users" --repo myorg/myapp
+telecoder run "add rate limiting to /api/users" --repo myorg/myapp
 # ...agent works in background...
 # -> PR #142 opened: https://github.com/myorg/myapp/pull/142
 ```
@@ -36,7 +36,7 @@ graph LR
 
     subgraph server ["TeleCoder Server"]
         Engine["Engine"]
-        Pipeline["Pipeline (Plan→Code→Review)"]
+        Pipeline["Pipeline\n(Plan→Code→Verify→Review)"]
         Sandbox["Docker Sandbox (Agent)"]
     end
 
@@ -82,7 +82,7 @@ See [docs/reference.md](docs/reference.md) for:
 - A GitHub personal access token ([create one](https://github.com/settings/tokens) with `repo` scope)
 - An LLM API key — `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`
 
-### Install
+### 1. Install
 
 ```bash
 go install github.com/jxucoder/TeleCoder/cmd/telecoder@latest
@@ -96,48 +96,90 @@ cd TeleCoder
 make build
 ```
 
-### Setup
+### 2. Configure
+
+The interactive setup wizard writes tokens to `~/.telecoder/config.env`:
 
 ```bash
-# Set required environment variables
+telecoder config setup
+```
+
+Or set environment variables directly:
+
+```bash
 export GITHUB_TOKEN="ghp_..."
 export ANTHROPIC_API_KEY="sk-ant-..."   # or OPENAI_API_KEY
+```
 
-# Build the sandbox Docker image
+You can also copy the example file and edit it:
+
+```bash
+cp .env.example .env
+```
+
+**Required:**
+
+| Variable | Description |
+|:---------|:------------|
+| `GITHUB_TOKEN` | GitHub personal access token with `repo` scope |
+| `ANTHROPIC_API_KEY` | Anthropic API key (uses OpenCode agent) |
+| `OPENAI_API_KEY` | OpenAI API key (uses Codex agent) — one of the two LLM keys is required |
+
+**Optional:**
+
+| Variable | Default | Description |
+|:---------|:--------|:------------|
+| `TELECODER_ADDR` | `:7080` | Server listen address |
+| `TELECODER_DOCKER_IMAGE` | `telecoder-sandbox` | Sandbox Docker image name |
+| `TELECODER_MAX_REVISIONS` | `1` | Max review/revision rounds per sub-task |
+| `TELECODER_PLANNER_MODEL` | auto | Override the LLM model used for plan/review pipeline stages |
+| `TELECODER_AGENT_MODEL` | auto | Override the model used by the in-sandbox coding agent |
+| `TELECODER_SERVER` | `http://localhost:7080` | Server URL (used by the CLI when talking to a remote server) |
+
+For Slack, Telegram, and webhook configuration, see [docs/reference.md](docs/reference.md).
+
+### 3. Build the Sandbox Image
+
+```bash
 make sandbox-image
 ```
 
-### Run
+This builds the Docker image that runs the coding agent. It includes Ubuntu 24.04, Node 22, Python 3.12, Go, and pre-installed agents (OpenCode, Codex CLI).
+
+To use a custom image, set `TELECODER_DOCKER_IMAGE` to your image name.
+
+### 4. Run
 
 ```bash
 # Start the server
-telecoderserve
+telecoder serve
 
 # In another terminal — run a task
-telecoderrun "fix the typo in README.md" --repo yourorg/yourrepo
+telecoder run "fix the typo in README.md" --repo yourorg/yourrepo
 
 # List sessions
-telecoderlist
+telecoder list
 
 # Check a session's status
-telecoderstatus <session-id>
+telecoder status <session-id>
 
 # Stream logs
-telecoderlogs <session-id> --follow
+telecoder logs <session-id> --follow
+```
+
+To point the CLI at a remote server:
+
+```bash
+telecoder run "your task" --repo owner/repo --server http://your-server:7080
 ```
 
 ### Docker Compose (fully containerized)
 
 ```bash
-# Configure tokens
 cp .env.example .env
 # Edit .env with your tokens
 
-# Start everything
 make docker-up
-
-# Run tasks against the server
-telecoderrun "your task" --repo owner/repo --server http://localhost:7080
 ```
 
 > See [docs/deploy.md](docs/deploy.md) for a full VPS deployment guide.
