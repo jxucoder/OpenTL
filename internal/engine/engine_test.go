@@ -2,17 +2,18 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jxucoder/TeleCoder/eventbus"
-	"github.com/jxucoder/TeleCoder/gitprovider"
-	"github.com/jxucoder/TeleCoder/model"
-	"github.com/jxucoder/TeleCoder/pipeline"
-	"github.com/jxucoder/TeleCoder/sandbox"
-	sqliteStore "github.com/jxucoder/TeleCoder/store/sqlite"
+	"github.com/jxucoder/TeleCoder/pkg/eventbus"
+	"github.com/jxucoder/TeleCoder/pkg/gitprovider"
+	"github.com/jxucoder/TeleCoder/pkg/model"
+	"github.com/jxucoder/TeleCoder/pkg/pipeline"
+	"github.com/jxucoder/TeleCoder/pkg/sandbox"
+	sqliteStore "github.com/jxucoder/TeleCoder/pkg/store/sqlite"
 )
 
 // --- stubs ---
@@ -587,6 +588,414 @@ func TestRunSession_PRResult_BackwardCompat(t *testing.T) {
 	if got.Result.PRUrl != got.PRUrl {
 		t.Fatalf("expected Result.PRUrl to match PRUrl, got %q vs %q", got.Result.PRUrl, got.PRUrl)
 	}
+}
+
+// --- Multi-step helper tests ---
+
+// multiStepSandbox simulates a persistent container that tracks exec calls
+// and optionally simulates uncommitted changes.
+type multiStepSandbox struct {
+	execCalls    [][]string
+	execResults  map[string]string // command prefix → output
+	execErrors   map[string]error  // command prefix → error
+	startCalls   int
+	stopCalls    int
+	hasChanges   bool // whether git diff --cached --quiet should "fail" (has changes)
+}
+
+func newMultiStepSandbox() *multiStepSandbox {
+	return &multiStepSandbox{
+		execResults: make(map[string]string),
+		execErrors:  make(map[string]error),
+	}
+}
+
+func (s *multiStepSandbox) Start(_ context.Context, _ sandbox.StartOptions) (string, error) {
+	s.startCalls++
+	return "multi-container", nil
+}
+func (s *multiStepSandbox) Stop(_ context.Context, _ string) error { s.stopCalls++; return nil }
+func (s *multiStepSandbox) Wait(_ context.Context, _ string) (int, error) { return 0, nil }
+func (s *multiStepSandbox) StreamLogs(_ context.Context, _ string) (sandbox.LineScanner, error) {
+	return &stubScanner{}, nil
+}
+func (s *multiStepSandbox) Exec(_ context.Context, _ string, cmd []string) (sandbox.LineScanner, error) {
+	s.execCalls = append(s.execCalls, cmd)
+	return &stubScanner{}, nil
+}
+func (s *multiStepSandbox) ExecCollect(_ context.Context, _ string, cmd []string) (string, error) {
+	s.execCalls = append(s.execCalls, cmd)
+
+	// Join cmd to match against known results.
+	joined := strings.Join(cmd, " ")
+
+	// Simulate git diff --cached --quiet behavior.
+	if strings.Contains(joined, "git diff --cached --quiet") {
+		if s.hasChanges {
+			return "", fmt.Errorf("exit status 1")
+		}
+		return "", nil
+	}
+
+	// Simulate git rev-parse HEAD.
+	if strings.Contains(joined, "git rev-parse HEAD") {
+		return "abc123def456\n", nil
+	}
+
+	// Check for custom results.
+	for prefix, result := range s.execResults {
+		if strings.Contains(joined, prefix) {
+			return result, s.execErrors[prefix]
+		}
+	}
+
+	return "", nil
+}
+func (s *multiStepSandbox) CommitAndPush(_ context.Context, _, _, _ string) error { return nil }
+func (s *multiStepSandbox) EnsureNetwork(_ context.Context, _ string) error       { return nil }
+func (s *multiStepSandbox) IsRunning(_ context.Context, _ string) bool            { return true }
+
+func TestBuildSandboxEnv(t *testing.T) {
+	eng, _, _ := testEngine(t)
+	eng.config.SandboxEnv = []string{"GITHUB_TOKEN=abc", "ANTHROPIC_API_KEY=xyz"}
+	eng.config.CodingAgent = "opencode"
+
+	env := eng.buildSandboxEnv("")
+	found := false
+	for _, e := range env {
+		if e == "TELECODER_CODING_AGENT=opencode" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected TELECODER_CODING_AGENT=opencode, got %v", env)
+	}
+
+	// Verify original slice not modified.
+	if len(eng.config.SandboxEnv) != 2 {
+		t.Fatalf("original sandbox env should not be modified, got %v", eng.config.SandboxEnv)
+	}
+}
+
+func TestBuildSandboxEnv_AutoAgent(t *testing.T) {
+	eng, _, _ := testEngine(t)
+	eng.config.SandboxEnv = []string{"GITHUB_TOKEN=abc"}
+	eng.config.CodingAgent = "auto"
+
+	env := eng.buildSandboxEnv("")
+	for _, e := range env {
+		if strings.HasPrefix(e, "TELECODER_CODING_AGENT=") {
+			t.Fatalf("should not set agent env for 'auto', got %v", env)
+		}
+	}
+}
+
+func TestCheckpointSubTask(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := sqliteStore.New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	bus := eventbus.NewInMemoryBus()
+	sb := newMultiStepSandbox()
+	sb.hasChanges = true // Simulate uncommitted changes.
+	git := &stubGitProvider{}
+	llmClient := &stubLLM{}
+
+	eng := New(
+		Config{DockerImage: "test-image", MaxRevisions: 1, ChatIdleTimeout: 30 * time.Minute, ChatMaxMessages: 50},
+		st, bus, sb, git,
+		pipeline.NewPlanStage(llmClient, ""),
+		pipeline.NewReviewStage(llmClient, ""),
+		pipeline.NewDecomposeStage(llmClient, ""),
+		pipeline.NewVerifyStage(llmClient, ""),
+	)
+
+	ctx := context.Background()
+	hash, err := eng.checkpointSubTask(ctx, "multi-container", "Add auth", 0)
+	if err != nil {
+		t.Fatalf("checkpointSubTask: %v", err)
+	}
+	if hash != "abc123def456" {
+		t.Fatalf("expected hash 'abc123def456', got %q", hash)
+	}
+
+	// Verify git add and git commit were called.
+	foundAdd := false
+	foundCommit := false
+	for _, cmd := range sb.execCalls {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, "git add -A") {
+			foundAdd = true
+		}
+		if strings.Contains(joined, "git commit") && strings.Contains(joined, "step 1") {
+			foundCommit = true
+		}
+	}
+	if !foundAdd {
+		t.Fatal("expected git add -A call")
+	}
+	if !foundCommit {
+		t.Fatal("expected git commit call with step number")
+	}
+}
+
+func TestCheckpointSubTask_NoChanges(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := sqliteStore.New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	bus := eventbus.NewInMemoryBus()
+	sb := newMultiStepSandbox()
+	sb.hasChanges = false // No uncommitted changes.
+	git := &stubGitProvider{}
+	llmClient := &stubLLM{}
+
+	eng := New(
+		Config{DockerImage: "test-image", MaxRevisions: 1, ChatIdleTimeout: 30 * time.Minute, ChatMaxMessages: 50},
+		st, bus, sb, git,
+		pipeline.NewPlanStage(llmClient, ""),
+		pipeline.NewReviewStage(llmClient, ""),
+		pipeline.NewDecomposeStage(llmClient, ""),
+		pipeline.NewVerifyStage(llmClient, ""),
+	)
+
+	ctx := context.Background()
+	hash, err := eng.checkpointSubTask(ctx, "multi-container", "Add auth", 0)
+	if err != nil {
+		t.Fatalf("checkpointSubTask: %v", err)
+	}
+	// Should return HEAD hash even without new commit.
+	if hash != "abc123def456" {
+		t.Fatalf("expected hash 'abc123def456', got %q", hash)
+	}
+
+	// Should NOT have a git commit call since there were no changes.
+	for _, cmd := range sb.execCalls {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, "git commit") {
+			t.Fatal("should not call git commit when no changes")
+		}
+	}
+}
+
+func TestHasUncommittedChanges(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := sqliteStore.New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	bus := eventbus.NewInMemoryBus()
+	sb := newMultiStepSandbox()
+	git := &stubGitProvider{}
+	llmClient := &stubLLM{}
+
+	eng := New(
+		Config{DockerImage: "test-image", MaxRevisions: 1, ChatIdleTimeout: 30 * time.Minute, ChatMaxMessages: 50},
+		st, bus, sb, git,
+		pipeline.NewPlanStage(llmClient, ""),
+		pipeline.NewReviewStage(llmClient, ""),
+		pipeline.NewDecomposeStage(llmClient, ""),
+		pipeline.NewVerifyStage(llmClient, ""),
+	)
+
+	ctx := context.Background()
+
+	sb.hasChanges = true
+	if !eng.hasUncommittedChanges(ctx, "multi-container") {
+		t.Fatal("expected hasUncommittedChanges=true")
+	}
+
+	sb.hasChanges = false
+	if eng.hasUncommittedChanges(ctx, "multi-container") {
+		t.Fatal("expected hasUncommittedChanges=false")
+	}
+}
+
+func TestRollbackToCheckpoint(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := sqliteStore.New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	bus := eventbus.NewInMemoryBus()
+	sb := newMultiStepSandbox()
+	git := &stubGitProvider{}
+	llmClient := &stubLLM{}
+
+	eng := New(
+		Config{DockerImage: "test-image", MaxRevisions: 1, ChatIdleTimeout: 30 * time.Minute, ChatMaxMessages: 50},
+		st, bus, sb, git,
+		pipeline.NewPlanStage(llmClient, ""),
+		pipeline.NewReviewStage(llmClient, ""),
+		pipeline.NewDecomposeStage(llmClient, ""),
+		pipeline.NewVerifyStage(llmClient, ""),
+	)
+
+	ctx := context.Background()
+	err = eng.rollbackToCheckpoint(ctx, "multi-container", "abc123")
+	if err != nil {
+		t.Fatalf("rollbackToCheckpoint: %v", err)
+	}
+
+	// Verify git reset --hard was called.
+	found := false
+	for _, cmd := range sb.execCalls {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, "git reset --hard abc123") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected git reset --hard call")
+	}
+}
+
+func TestWriteProgressFile(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := sqliteStore.New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	bus := eventbus.NewInMemoryBus()
+	sb := newMultiStepSandbox()
+	git := &stubGitProvider{}
+	llmClient := &stubLLM{}
+
+	eng := New(
+		Config{DockerImage: "test-image", MaxRevisions: 1, ChatIdleTimeout: 30 * time.Minute, ChatMaxMessages: 50},
+		st, bus, sb, git,
+		pipeline.NewPlanStage(llmClient, ""),
+		pipeline.NewReviewStage(llmClient, ""),
+		pipeline.NewDecomposeStage(llmClient, ""),
+		pipeline.NewVerifyStage(llmClient, ""),
+	)
+
+	statuses := []pipeline.SubTaskStatus{
+		{Title: "Step 1", Description: "Do thing", Status: "completed", CommitHash: "abc"},
+	}
+
+	ctx := context.Background()
+	err = eng.writeProgressFile(ctx, "multi-container", statuses)
+	if err != nil {
+		t.Fatalf("writeProgressFile: %v", err)
+	}
+
+	// Verify a cat command was exec'd that writes to .telecoder-progress.json.
+	found := false
+	for _, cmd := range sb.execCalls {
+		joined := strings.Join(cmd, " ")
+		if strings.Contains(joined, ".telecoder-progress.json") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected exec call writing .telecoder-progress.json")
+	}
+}
+
+// TestRunSessionMultiStep_PersistentContainer verifies that the multi-step path
+// starts a persistent container and runs setup.
+func TestRunSessionMultiStep_PersistentContainer(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	st, err := sqliteStore.New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	bus := eventbus.NewInMemoryBus()
+	sb := newMultiStepSandbox()
+	sb.hasChanges = true // Simulate code changes.
+	git := &stubGitProvider{}
+
+	// Use an LLM that returns 2 sub-tasks.
+	multiLLM := &multiStepLLM{}
+
+	eng := New(
+		Config{
+			DockerImage:     "test-image",
+			MaxRevisions:    1,
+			MaxSubTasks:     5,
+			ChatIdleTimeout: 30 * time.Minute,
+			ChatMaxMessages: 50,
+		},
+		st, bus, sb, git,
+		pipeline.NewPlanStage(multiLLM, ""),
+		pipeline.NewReviewStage(multiLLM, ""),
+		pipeline.NewDecomposeStage(multiLLM, ""),
+		pipeline.NewVerifyStage(multiLLM, ""),
+	)
+
+	sess, err := eng.CreateAndRunSession("owner/repo", "complex feature")
+	if err != nil {
+		t.Fatalf("CreateAndRunSession: %v", err)
+	}
+
+	// Wait for the session to complete.
+	time.Sleep(1 * time.Second)
+
+	got, _ := eng.Store().GetSession(sess.ID)
+	if got.Status != model.StatusComplete {
+		t.Fatalf("expected 'complete', got %q (error: %s)", got.Status, got.Error)
+	}
+
+	// Verify persistent container was started.
+	if sb.startCalls < 1 {
+		t.Fatal("expected at least one sandbox Start call")
+	}
+
+	// Verify PR was created (since hasChanges=true).
+	if git.createPRCalls < 1 {
+		t.Fatal("expected PR to be created for multi-step task with changes")
+	}
+
+	// Verify progress events were emitted.
+	events, _ := eng.Store().GetEvents(sess.ID, 0)
+	progressCount := 0
+	stepCount := 0
+	for _, ev := range events {
+		if ev.Type == "progress" {
+			progressCount++
+		}
+		if ev.Type == "step" {
+			stepCount++
+		}
+	}
+	if stepCount < 2 {
+		t.Fatalf("expected at least 2 step events, got %d", stepCount)
+	}
+}
+
+// multiStepLLM returns 2 sub-tasks from decompose and simple plans/reviews.
+type multiStepLLM struct{}
+
+func (m *multiStepLLM) Complete(_ context.Context, system, _ string) (string, error) {
+	lower := strings.ToLower(system)
+	if strings.Contains(lower, "decompos") || strings.Contains(lower, "sub-task") {
+		return `[{"title":"Add feature","description":"Implement the core feature"},{"title":"Add tests","description":"Add unit tests for the feature"}]`, nil
+	}
+	if strings.Contains(lower, "plan") {
+		return "1. Modify files\n2. Add tests", nil
+	}
+	if strings.Contains(lower, "review") {
+		return "APPROVED: looks good", nil
+	}
+	if strings.Contains(lower, "verify") || strings.Contains(lower, "test output") {
+		return "PASSED: all tests pass", nil
+	}
+	return "ok", nil
 }
 
 func TestDispatchLogLine_ResultMarker(t *testing.T) {

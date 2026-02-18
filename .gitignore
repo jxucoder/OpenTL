@@ -5,6 +5,11 @@ bin/
 *.so
 *.dylib
 
+# Root-level Go binaries (from go build ./...)
+aipedia
+minimal
+telecoder
+
 # Go
 *.test
 *.out

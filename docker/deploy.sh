@@ -6,7 +6,7 @@
 #
 #   git clone https://github.com/jxucoder/TeleCoder.git
 #   cd TeleCoder
-#   ./deploy.sh
+#   ./docker/deploy.sh
 #
 # The script will:
 #   1. Wait for apt locks to clear (fresh server auto-updates)
@@ -19,7 +19,7 @@
 # For CI / non-interactive use, set tokens before running:
 #   export GITHUB_TOKEN=ghp_xxx
 #   export ANTHROPIC_API_KEY=sk-ant-xxx
-#   ./deploy.sh --non-interactive
+#   ./docker/deploy.sh --non-interactive
 #
 set -euo pipefail
 
@@ -239,7 +239,7 @@ if curl -sf http://localhost:7080/api/sessions >/dev/null 2>&1; then
     echo "  Manage:"
     echo "    Logs:     docker compose -f docker/compose.yml logs -f"
     echo "    Stop:     docker compose -f docker/compose.yml down"
-    echo "    Update:   git pull && ./deploy.sh"
+    echo "    Update:   git pull && ./docker/deploy.sh"
     echo ""
 else
     warn "Server may not have started. Check logs:"

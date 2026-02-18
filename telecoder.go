@@ -16,19 +16,27 @@ package telecoder
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
-	"github.com/jxucoder/TeleCoder/channel"
-	"github.com/jxucoder/TeleCoder/engine"
-	"github.com/jxucoder/TeleCoder/eventbus"
-	"github.com/jxucoder/TeleCoder/gitprovider"
-	"github.com/jxucoder/TeleCoder/httpapi"
-	"github.com/jxucoder/TeleCoder/llm"
-	"github.com/jxucoder/TeleCoder/pipeline"
-	"github.com/jxucoder/TeleCoder/sandbox"
-	"github.com/jxucoder/TeleCoder/store"
+	"github.com/jxucoder/TeleCoder/internal/engine"
+	"github.com/jxucoder/TeleCoder/internal/httpapi"
+	"github.com/jxucoder/TeleCoder/pkg/channel"
+	"github.com/jxucoder/TeleCoder/pkg/eventbus"
+	"github.com/jxucoder/TeleCoder/pkg/gitprovider"
+	ghProvider "github.com/jxucoder/TeleCoder/pkg/gitprovider/github"
+	"github.com/jxucoder/TeleCoder/pkg/llm"
+	llmAnthropic "github.com/jxucoder/TeleCoder/pkg/llm/anthropic"
+	llmOpenAI "github.com/jxucoder/TeleCoder/pkg/llm/openai"
+	"github.com/jxucoder/TeleCoder/pkg/pipeline"
+	"github.com/jxucoder/TeleCoder/pkg/sandbox"
+	dockerSandbox "github.com/jxucoder/TeleCoder/pkg/sandbox/docker"
+	"github.com/jxucoder/TeleCoder/pkg/store"
+	sqliteStore "github.com/jxucoder/TeleCoder/pkg/store/sqlite"
 )
 
 // Config holds top-level configuration for a TeleCoder application.
@@ -67,6 +75,12 @@ type Config struct {
 	// Valid values: "opencode", "claude-code", "codex", "auto" (default).
 	// "auto" selects based on API keys: ANTHROPIC_API_KEY → OpenCode, OPENAI_API_KEY → Codex.
 	CodingAgent string
+
+	// MaxSubTasks is the maximum number of sub-tasks the decompose stage may
+	// produce for a single task session (default 5, max 15). When a task is
+	// decomposed into multiple sub-tasks, the engine uses a persistent container
+	// with git checkpoints and progress tracking.
+	MaxSubTasks int
 }
 
 // Builder constructs a TeleCoder App.
@@ -162,6 +176,7 @@ func (b *Builder) Build() (*App, error) {
 			ChatMaxMessages: b.config.ChatMaxMessages,
 			WebhookSecret:   b.config.WebhookSecret,
 			CodingAgent:     b.config.CodingAgent,
+			MaxSubTasks:     b.config.MaxSubTasks,
 		},
 		b.store,
 		b.bus,
@@ -227,4 +242,114 @@ func (a *App) Start(ctx context.Context) error {
 
 	a.engine.Stop()
 	return a.engine.Store().Close()
+}
+
+// ---------------------------------------------------------------------------
+// Defaults
+// ---------------------------------------------------------------------------
+
+// applyDefaults fills in missing fields on the builder with sensible defaults.
+func applyDefaults(b *Builder) error {
+	// Config defaults.
+	if b.config.ServerAddr == "" {
+		b.config.ServerAddr = ":7080"
+	}
+	if b.config.DataDir == "" {
+		b.config.DataDir = defaultDataDir()
+	}
+	if b.config.DatabasePath == "" {
+		b.config.DatabasePath = filepath.Join(b.config.DataDir, "telecoder.db")
+	}
+	if b.config.DockerImage == "" {
+		b.config.DockerImage = "telecoder-sandbox"
+	}
+	if b.config.DockerNetwork == "" {
+		b.config.DockerNetwork = "telecoder-net"
+	}
+	if b.config.MaxRevisions == 0 {
+		b.config.MaxRevisions = 1
+	}
+	if b.config.ChatIdleTimeout == 0 {
+		b.config.ChatIdleTimeout = 30 * time.Minute
+	}
+	if b.config.ChatMaxMessages == 0 {
+		b.config.ChatMaxMessages = 50
+	}
+	if b.config.MaxSubTasks == 0 {
+		b.config.MaxSubTasks = 5
+	}
+
+	// Ensure data dir exists.
+	if err := os.MkdirAll(b.config.DataDir, 0o755); err != nil {
+		return fmt.Errorf("creating data directory: %w", err)
+	}
+
+	// Store.
+	if b.store == nil {
+		st, err := sqliteStore.New(b.config.DatabasePath)
+		if err != nil {
+			return fmt.Errorf("initializing store: %w", err)
+		}
+		b.store = st
+	}
+
+	// Event bus.
+	if b.bus == nil {
+		b.bus = eventbus.NewInMemoryBus()
+	}
+
+	// Sandbox runtime.
+	if b.sandbox == nil {
+		b.sandbox = dockerSandbox.New()
+	}
+
+	// Git provider.
+	if b.git == nil {
+		token := os.Getenv("GITHUB_TOKEN")
+		if token != "" {
+			b.git = ghProvider.New(token)
+		}
+	}
+
+	// LLM + pipeline stages.
+	if b.llm == nil {
+		b.llm = llmClientFromEnv()
+	}
+
+	if b.llm != nil {
+		if b.plan == nil {
+			b.plan = pipeline.NewPlanStage(b.llm, "")
+		}
+		if b.review == nil {
+			b.review = pipeline.NewReviewStage(b.llm, "")
+		}
+		if b.decompose == nil {
+			b.decompose = pipeline.NewDecomposeStage(b.llm, "")
+		}
+		if b.verify == nil {
+			b.verify = pipeline.NewVerifyStage(b.llm, "")
+		}
+	}
+
+	return nil
+}
+
+// llmClientFromEnv creates an LLM client from environment variables.
+// Returns nil if no API key is found.
+func llmClientFromEnv() llm.Client {
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		return llmAnthropic.New(key, os.Getenv("TELECODER_LLM_MODEL"))
+	}
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		return llmOpenAI.New(key, os.Getenv("TELECODER_LLM_MODEL"))
+	}
+	return nil
+}
+
+func defaultDataDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ".telecoder"
+	}
+	return filepath.Join(home, ".telecoder")
 }

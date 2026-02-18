@@ -13,7 +13,7 @@
 // event streaming — is real production code.
 //
 // Does NOT require Docker, API keys, or network access.
-package telecoder_test
+package e2e_test
 
 import (
 	"bufio"
@@ -29,14 +29,14 @@ import (
 	"time"
 
 	telecoder "github.com/jxucoder/TeleCoder"
-	"github.com/jxucoder/TeleCoder/engine"
-	"github.com/jxucoder/TeleCoder/eventbus"
-	"github.com/jxucoder/TeleCoder/gitprovider"
-	"github.com/jxucoder/TeleCoder/httpapi"
-	"github.com/jxucoder/TeleCoder/model"
-	"github.com/jxucoder/TeleCoder/pipeline"
-	"github.com/jxucoder/TeleCoder/sandbox"
-	sqliteStore "github.com/jxucoder/TeleCoder/store/sqlite"
+	"github.com/jxucoder/TeleCoder/pkg/eventbus"
+	"github.com/jxucoder/TeleCoder/pkg/gitprovider"
+	"github.com/jxucoder/TeleCoder/internal/engine"
+	"github.com/jxucoder/TeleCoder/internal/httpapi"
+	"github.com/jxucoder/TeleCoder/pkg/model"
+	"github.com/jxucoder/TeleCoder/pkg/pipeline"
+	"github.com/jxucoder/TeleCoder/pkg/sandbox"
+	sqliteStore "github.com/jxucoder/TeleCoder/pkg/store/sqlite"
 )
 
 // ---------------------------------------------------------------------------
@@ -467,6 +467,218 @@ func TestE2E_HealthCheck(t *testing.T) {
 	if w.Body.String() != "ok" {
 		t.Fatalf("expected 'ok', got %q", w.Body.String())
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Multi-step sandbox: supports persistent container mode for multi-step tasks
+// ---------------------------------------------------------------------------
+
+type multiStepSimSandbox struct {
+	mu        sync.Mutex
+	starts    []sandbox.StartOptions
+	stopCalls int
+}
+
+func (s *multiStepSimSandbox) Start(_ context.Context, opts sandbox.StartOptions) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.starts = append(s.starts, opts)
+	return fmt.Sprintf("msim-%s-%d", opts.SessionID, len(s.starts)), nil
+}
+
+func (s *multiStepSimSandbox) Stop(_ context.Context, _ string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopCalls++
+	return nil
+}
+
+func (s *multiStepSimSandbox) Wait(_ context.Context, _ string) (int, error) { return 0, nil }
+
+func (s *multiStepSimSandbox) StreamLogs(_ context.Context, _ string) (sandbox.LineScanner, error) {
+	return &lineSliceScanner{lines: []string{"single-task log"}}, nil
+}
+
+func (s *multiStepSimSandbox) Exec(_ context.Context, _ string, cmd []string) (sandbox.LineScanner, error) {
+	// For setup.sh, return status lines.
+	if len(cmd) > 0 && cmd[0] == "/setup.sh" {
+		return &lineSliceScanner{lines: []string{
+			"###TELECODER_STATUS### Cloning repo...",
+			"###TELECODER_STATUS### Dependencies installed",
+			"###TELECODER_STATUS### Ready",
+		}}, nil
+	}
+	// For agent commands, return agent output.
+	return &lineSliceScanner{lines: []string{"Agent completed step."}}, nil
+}
+
+func (s *multiStepSimSandbox) ExecCollect(_ context.Context, _ string, cmd []string) (string, error) {
+	joined := strings.Join(cmd, " ")
+
+	// Simulate git diff --cached --quiet: return error to indicate changes exist.
+	if strings.Contains(joined, "git diff --cached --quiet") {
+		return "", fmt.Errorf("exit status 1")
+	}
+
+	// Simulate git rev-parse HEAD.
+	if strings.Contains(joined, "git rev-parse HEAD") {
+		return "e2eabc123\n", nil
+	}
+
+	// Simulate file-not-found for test detection probes.
+	if len(cmd) > 0 && cmd[0] == "test" {
+		return "", fmt.Errorf("file not found")
+	}
+
+	// Simulate git push.
+	if strings.Contains(joined, "git push") {
+		return "pushed\n", nil
+	}
+
+	return "", nil
+}
+
+func (s *multiStepSimSandbox) CommitAndPush(_ context.Context, _, _, _ string) error { return nil }
+func (s *multiStepSimSandbox) EnsureNetwork(_ context.Context, _ string) error      { return nil }
+func (s *multiStepSimSandbox) IsRunning(_ context.Context, _ string) bool           { return true }
+
+func (s *multiStepSimSandbox) getStarts() []sandbox.StartOptions {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := make([]sandbox.StartOptions, len(s.starts))
+	copy(cp, s.starts)
+	return cp
+}
+
+// Multi-step fake LLM: returns 3 sub-tasks for decompose.
+type multiStepFakeLLM struct{}
+
+func (f *multiStepFakeLLM) Complete(_ context.Context, system, _ string) (string, error) {
+	lower := strings.ToLower(system)
+	if strings.Contains(lower, "decompos") || strings.Contains(lower, "sub-task") {
+		return `[
+			{"title":"Add data model","description":"Create the data model and database schema"},
+			{"title":"Add API endpoints","description":"Implement REST API endpoints"},
+			{"title":"Add tests","description":"Add comprehensive unit tests"}
+		]`, nil
+	}
+	if strings.Contains(lower, "plan") {
+		return "1. Create files\n2. Test", nil
+	}
+	if strings.Contains(lower, "review") {
+		return "APPROVED: good", nil
+	}
+	if strings.Contains(lower, "verify") || strings.Contains(lower, "test output") {
+		return "PASSED: all pass", nil
+	}
+	return "ok", nil
+}
+
+// TestE2E_MultiStepTaskWithCheckpoints verifies the full multi-step flow:
+// POST session → decompose into 3 steps → persistent container → checkpoints → PR.
+func TestE2E_MultiStepTaskWithCheckpoints(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "e2e_multi.db")
+	st, err := sqliteStore.New(dbPath)
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+
+	bus := eventbus.NewInMemoryBus()
+	sb := &multiStepSimSandbox{}
+	git := &fakeGitProvider{}
+	llm := &multiStepFakeLLM{}
+
+	cfg := engine.Config{
+		DockerImage:     "telecoder-sandbox",
+		MaxRevisions:    1,
+		MaxSubTasks:     10,
+		ChatIdleTimeout: 30 * time.Minute,
+		ChatMaxMessages: 50,
+	}
+
+	eng := engine.New(
+		cfg, st, bus, sb, git,
+		pipeline.NewPlanStage(llm, ""),
+		pipeline.NewReviewStage(llm, ""),
+		pipeline.NewDecomposeStage(llm, ""),
+		pipeline.NewVerifyStage(llm, ""),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	eng.Start(ctx)
+	t.Cleanup(func() {
+		cancel()
+		eng.Stop()
+	})
+
+	handler := httpapi.New(eng)
+	h := &e2eHarness{handler: handler, sb: nil, git: git, eng: eng}
+
+	// 1. Create session.
+	w := h.do("POST", "/api/sessions", `{"repo":"myorg/myapp","prompt":"add user auth with login, signup, and password reset"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var created struct {
+		ID   string `json:"id"`
+		Mode string `json:"mode"`
+	}
+	json.NewDecoder(w.Body).Decode(&created)
+	t.Logf("Created multi-step session %s", created.ID)
+
+	// 2. Wait for completion.
+	sess := h.waitForSession(t, created.ID, 15*time.Second)
+	if sess.Status != model.StatusComplete {
+		t.Fatalf("expected 'complete', got %q (error: %s)", sess.Status, sess.Error)
+	}
+
+	// 3. Verify PR was created.
+	if sess.PRUrl == "" || sess.PRNumber == 0 {
+		t.Fatal("expected PR URL and number to be set")
+	}
+	git.mu.Lock()
+	if !git.prCreated {
+		t.Fatal("expected git CreatePR to be called")
+	}
+	git.mu.Unlock()
+
+	// 4. Verify persistent container was used (Persistent=true in starts).
+	starts := sb.getStarts()
+	persistentFound := false
+	for _, s := range starts {
+		if s.Persistent {
+			persistentFound = true
+			break
+		}
+	}
+	if !persistentFound {
+		t.Fatal("expected at least one persistent sandbox Start for multi-step task")
+	}
+
+	// 5. Verify events include step and progress markers.
+	events, err := eng.Store().GetEvents(created.ID, 0)
+	if err != nil {
+		t.Fatalf("GetEvents: %v", err)
+	}
+	stepCount := 0
+	progressCount := 0
+	for _, ev := range events {
+		if ev.Type == "step" {
+			stepCount++
+		}
+		if ev.Type == "progress" {
+			progressCount++
+		}
+	}
+	if stepCount < 3 {
+		t.Fatalf("expected at least 3 step events (one per sub-task), got %d", stepCount)
+	}
+	if progressCount < 3 {
+		t.Fatalf("expected at least 3 progress events, got %d", progressCount)
+	}
+	t.Logf("Multi-step session completed: PR=%s, steps=%d, progress events=%d", sess.PRUrl, stepCount, progressCount)
 }
 
 // Compile-time check that top-level types are referenced.

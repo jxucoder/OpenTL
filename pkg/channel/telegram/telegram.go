@@ -11,9 +11,9 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
-	"github.com/jxucoder/TeleCoder/eventbus"
-	"github.com/jxucoder/TeleCoder/model"
-	"github.com/jxucoder/TeleCoder/store"
+	"github.com/jxucoder/TeleCoder/pkg/eventbus"
+	"github.com/jxucoder/TeleCoder/pkg/model"
+	"github.com/jxucoder/TeleCoder/pkg/store"
 )
 
 // ChatSessionCreator is the interface the engine implements for chat sessions.

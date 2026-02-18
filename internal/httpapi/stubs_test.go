@@ -3,8 +3,8 @@ package httpapi
 import (
 	"context"
 
-	"github.com/jxucoder/TeleCoder/gitprovider"
-	"github.com/jxucoder/TeleCoder/sandbox"
+	"github.com/jxucoder/TeleCoder/pkg/gitprovider"
+	"github.com/jxucoder/TeleCoder/pkg/sandbox"
 )
 
 // stubLLM returns canned responses for pipeline stages.

@@ -8,7 +8,7 @@ import (
 
 	gogh "github.com/google/go-github/v68/github"
 
-	"github.com/jxucoder/TeleCoder/gitprovider"
+	"github.com/jxucoder/TeleCoder/pkg/gitprovider"
 )
 
 var keyFileNames = map[string]bool{

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/jxucoder/TeleCoder/llm"
+	"github.com/jxucoder/TeleCoder/pkg/llm"
 )
 
 // VerifyResult is the outcome of running tests/linting inside the sandbox.

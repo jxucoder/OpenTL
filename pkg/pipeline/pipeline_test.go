@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -155,4 +156,143 @@ func TestExtractJSON(t *testing.T) {
 	if !strings.HasPrefix(got, "[") || !strings.HasSuffix(got, "]") {
 		t.Fatalf("failed to extract json array: %q", got)
 	}
+}
+
+// --- Progress helper tests ---
+
+func TestFormatProgressJSON(t *testing.T) {
+	statuses := []SubTaskStatus{
+		{Title: "Add auth", Description: "Add authentication", Status: "completed", CommitHash: "abc123"},
+		{Title: "Add tests", Description: "Add unit tests", Status: "running"},
+		{Title: "Add docs", Description: "Add documentation", Status: "pending"},
+	}
+
+	out, err := FormatProgressJSON(statuses)
+	if err != nil {
+		t.Fatalf("FormatProgressJSON error: %v", err)
+	}
+	if !strings.Contains(out, "Add auth") {
+		t.Fatalf("expected 'Add auth' in output: %s", out)
+	}
+	if !strings.Contains(out, "abc123") {
+		t.Fatalf("expected commit hash in output: %s", out)
+	}
+	if !strings.Contains(out, "running") {
+		t.Fatalf("expected 'running' status in output: %s", out)
+	}
+
+	// Should be valid JSON that round-trips.
+	var parsed []SubTaskStatus
+	if err := json.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Fatalf("failed to parse output JSON: %v", err)
+	}
+	if len(parsed) != 3 {
+		t.Fatalf("expected 3 items, got %d", len(parsed))
+	}
+	if parsed[0].CommitHash != "abc123" {
+		t.Fatalf("expected commit hash 'abc123', got %q", parsed[0].CommitHash)
+	}
+}
+
+func TestFormatProgressJSON_Empty(t *testing.T) {
+	out, err := FormatProgressJSON([]SubTaskStatus{})
+	if err != nil {
+		t.Fatalf("FormatProgressJSON error: %v", err)
+	}
+	if out != "[]" {
+		t.Fatalf("expected empty array, got %q", out)
+	}
+}
+
+func TestProgressContext_FirstStep(t *testing.T) {
+	statuses := []SubTaskStatus{
+		{Title: "Step 1", Description: "Do thing 1", Status: "running"},
+		{Title: "Step 2", Description: "Do thing 2", Status: "pending"},
+	}
+
+	ctx := ProgressContext(statuses, 0)
+	if ctx != "" {
+		t.Fatalf("expected empty context for first step, got %q", ctx)
+	}
+}
+
+func TestProgressContext_SecondStep(t *testing.T) {
+	statuses := []SubTaskStatus{
+		{Title: "Add auth", Description: "Add authentication module", Status: "completed", CommitHash: "abc123"},
+		{Title: "Add tests", Description: "Add unit tests", Status: "running"},
+		{Title: "Add docs", Description: "Add documentation", Status: "pending"},
+	}
+
+	ctx := ProgressContext(statuses, 1)
+	if !strings.Contains(ctx, "Previous Steps") {
+		t.Fatalf("expected 'Previous Steps' header: %s", ctx)
+	}
+	if !strings.Contains(ctx, "Add auth") {
+		t.Fatalf("expected completed step in context: %s", ctx)
+	}
+	if !strings.Contains(ctx, "Current Step (2/3)") {
+		t.Fatalf("expected current step marker: %s", ctx)
+	}
+	if !strings.Contains(ctx, "Add tests") {
+		t.Fatalf("expected current step title: %s", ctx)
+	}
+	// Should NOT contain the third step.
+	if strings.Contains(ctx, "Add docs") {
+		t.Fatalf("should not contain future step: %s", ctx)
+	}
+}
+
+func TestProgressContext_FailedStep(t *testing.T) {
+	statuses := []SubTaskStatus{
+		{Title: "Step 1", Description: "First step", Status: "failed"},
+		{Title: "Step 2", Description: "Second step", Status: "running"},
+	}
+
+	ctx := ProgressContext(statuses, 1)
+	if !strings.Contains(ctx, "❌") {
+		t.Fatalf("expected failure icon for failed step: %s", ctx)
+	}
+}
+
+func TestDecomposeWithMaxSubTasks(t *testing.T) {
+	// When maxSubTasks > 5, the user message should include the max instruction.
+	var capturedUser string
+	stage := NewDecomposeStage(&fakeLLM{response: `[{"title":"T1","description":"D1"}]`}, "")
+
+	// Override LLM to capture the user message.
+	capturingLLM := &capturingFakeLLM{response: `[{"title":"T1","description":"D1"}]`}
+	stage.llm = capturingLLM
+
+	ctx := &Context{Ctx: context.Background(), Prompt: "complex task"}
+	if err := stage.ExecuteWithMaxSubTasks(ctx, 10); err != nil {
+		t.Fatalf("decompose error: %v", err)
+	}
+	capturedUser = capturingLLM.lastUser
+	if !strings.Contains(capturedUser, "up to 10 steps") {
+		t.Fatalf("expected max steps instruction in user message: %s", capturedUser)
+	}
+}
+
+func TestDecomposeWithDefaultMax(t *testing.T) {
+	capturingLLM := &capturingFakeLLM{response: `[{"title":"T1","description":"D1"}]`}
+	stage := NewDecomposeStage(capturingLLM, "")
+
+	ctx := &Context{Ctx: context.Background(), Prompt: "simple task"}
+	if err := stage.ExecuteWithMaxSubTasks(ctx, 5); err != nil {
+		t.Fatalf("decompose error: %v", err)
+	}
+	if strings.Contains(capturingLLM.lastUser, "up to") {
+		t.Fatalf("should not include max steps instruction for default (5): %s", capturingLLM.lastUser)
+	}
+}
+
+// capturingFakeLLM records the user message.
+type capturingFakeLLM struct {
+	response string
+	lastUser string
+}
+
+func (f *capturingFakeLLM) Complete(_ context.Context, _, user string) (string, error) {
+	f.lastUser = user
+	return f.response, nil
 }

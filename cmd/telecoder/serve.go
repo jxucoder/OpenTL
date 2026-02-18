@@ -15,10 +15,11 @@ import (
 	"github.com/spf13/cobra"
 
 	telecoder "github.com/jxucoder/TeleCoder"
-	channelJira "github.com/jxucoder/TeleCoder/channel/jira"
-	channelLinear "github.com/jxucoder/TeleCoder/channel/linear"
-	channelSlack "github.com/jxucoder/TeleCoder/channel/slack"
-	channelTelegram "github.com/jxucoder/TeleCoder/channel/telegram"
+	channelGithub "github.com/jxucoder/TeleCoder/pkg/channel/github"
+	channelJira "github.com/jxucoder/TeleCoder/pkg/channel/jira"
+	channelLinear "github.com/jxucoder/TeleCoder/pkg/channel/linear"
+	channelSlack "github.com/jxucoder/TeleCoder/pkg/channel/slack"
+	channelTelegram "github.com/jxucoder/TeleCoder/pkg/channel/telegram"
 )
 
 var serveCmd = &cobra.Command{
@@ -68,6 +69,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		ChatMaxMessages: envOrIntDefault("TELECODER_CHAT_MAX_MESSAGES", 50),
 		WebhookSecret:   os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		CodingAgent:     envOrDefault("TELECODER_CODING_AGENT", "auto"),
+		MaxSubTasks:     envOrIntDefault("TELECODER_MAX_SUBTASKS", 5),
 	}
 
 	builder := telecoder.NewBuilder().WithConfig(cfg)
@@ -156,6 +158,25 @@ func runServe(cmd *cobra.Command, args []string) error {
 		)
 		builder.WithChannel(jiraBot)
 		fmt.Println("Jira channel enabled (webhook)")
+	}
+
+	// Add GitHub Issues channel if explicitly enabled.
+	if os.Getenv("GITHUB_ISSUES_CHANNEL") == "true" {
+		var opts []channelGithub.Option
+		if addr := os.Getenv("GITHUB_ISSUES_WEBHOOK_ADDR"); addr != "" {
+			opts = append(opts, channelGithub.WithAddr(addr))
+		}
+		ghIssuesBot := channelGithub.New(
+			os.Getenv("GITHUB_TOKEN"),
+			os.Getenv("GITHUB_WEBHOOK_SECRET"),
+			os.Getenv("GITHUB_ISSUES_TRIGGER_LABEL"),
+			app.Engine().Store(),
+			app.Engine().Bus(),
+			app.Engine(),
+			opts...,
+		)
+		builder.WithChannel(ghIssuesBot)
+		fmt.Println("GitHub Issues channel enabled (webhook)")
 	}
 
 	// Rebuild with channels added.

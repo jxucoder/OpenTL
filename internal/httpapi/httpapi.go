@@ -13,9 +13,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/jxucoder/TeleCoder/engine"
-	ghWebhook "github.com/jxucoder/TeleCoder/gitprovider/github"
-	"github.com/jxucoder/TeleCoder/model"
+	"github.com/jxucoder/TeleCoder/internal/engine"
+	ghWebhook "github.com/jxucoder/TeleCoder/pkg/gitprovider/github"
+	"github.com/jxucoder/TeleCoder/pkg/model"
 )
 
 // Handler provides the HTTP API for TeleCoder.

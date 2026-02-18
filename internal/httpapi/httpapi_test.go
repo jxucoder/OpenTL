@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jxucoder/TeleCoder/engine"
-	"github.com/jxucoder/TeleCoder/eventbus"
-	"github.com/jxucoder/TeleCoder/model"
-	"github.com/jxucoder/TeleCoder/pipeline"
-	sqliteStore "github.com/jxucoder/TeleCoder/store/sqlite"
+	"github.com/jxucoder/TeleCoder/internal/engine"
+	"github.com/jxucoder/TeleCoder/pkg/eventbus"
+	"github.com/jxucoder/TeleCoder/pkg/model"
+	"github.com/jxucoder/TeleCoder/pkg/pipeline"
+	sqliteStore "github.com/jxucoder/TeleCoder/pkg/store/sqlite"
 )
 
 // testEngine builds an Engine wired to a real SQLite store, in-memory bus,

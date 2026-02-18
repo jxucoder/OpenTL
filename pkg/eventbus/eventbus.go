@@ -5,7 +5,7 @@ package eventbus
 import (
 	"sync"
 
-	"github.com/jxucoder/TeleCoder/model"
+	"github.com/jxucoder/TeleCoder/pkg/model"
 )
 
 // Bus provides pub/sub for session events.

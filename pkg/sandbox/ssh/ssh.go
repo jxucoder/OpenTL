@@ -21,7 +21,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/jxucoder/TeleCoder/sandbox"
+	"github.com/jxucoder/TeleCoder/pkg/sandbox"
 )
 
 // Config holds SSH connection settings.

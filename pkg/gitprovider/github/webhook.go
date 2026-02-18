@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jxucoder/TeleCoder/gitprovider"
+	"github.com/jxucoder/TeleCoder/pkg/gitprovider"
 )
 
 // ParseWebhook parses a GitHub webhook request into a WebhookEvent.

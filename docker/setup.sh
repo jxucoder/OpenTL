@@ -38,6 +38,9 @@ git checkout -b "${TELECODER_BRANCH}"
 
 emit_status "Repository cloned successfully"
 
+# Ensure progress file is ignored in git.
+grep -qxF '.telecoder-progress.json' .gitignore 2>/dev/null || echo '.telecoder-progress.json' >> .gitignore
+
 # --- Install project dependencies (best-effort) ---
 emit_status "Detecting and installing dependencies..."
 

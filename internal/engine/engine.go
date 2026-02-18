@@ -13,13 +13,13 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/jxucoder/TeleCoder/eventbus"
-	"github.com/jxucoder/TeleCoder/gitprovider"
-	ghImpl "github.com/jxucoder/TeleCoder/gitprovider/github"
-	"github.com/jxucoder/TeleCoder/model"
-	"github.com/jxucoder/TeleCoder/pipeline"
-	"github.com/jxucoder/TeleCoder/sandbox"
-	"github.com/jxucoder/TeleCoder/store"
+	"github.com/jxucoder/TeleCoder/pkg/eventbus"
+	"github.com/jxucoder/TeleCoder/pkg/gitprovider"
+	ghImpl "github.com/jxucoder/TeleCoder/pkg/gitprovider/github"
+	"github.com/jxucoder/TeleCoder/pkg/model"
+	"github.com/jxucoder/TeleCoder/pkg/pipeline"
+	"github.com/jxucoder/TeleCoder/pkg/sandbox"
+	"github.com/jxucoder/TeleCoder/pkg/store"
 )
 
 // Config holds engine-specific configuration.
@@ -35,6 +35,9 @@ type Config struct {
 	// CodingAgent is the coding agent to run inside the sandbox.
 	// "opencode", "claude-code", "codex", or "auto" (default).
 	CodingAgent string
+
+	// MaxSubTasks is the maximum number of sub-tasks for task decomposition (default 5).
+	MaxSubTasks int
 }
 
 // Engine orchestrates TeleCoder session lifecycle.
@@ -461,6 +464,133 @@ func (e *Engine) chatAgentCommand(sessionAgent, content string) string {
 	}
 }
 
+// --- Sandbox env helper ---
+
+// buildSandboxEnv creates a copy of the base sandbox env with agent selection applied.
+func (e *Engine) buildSandboxEnv(sessionAgent string) []string {
+	sandboxEnv := make([]string, len(e.config.SandboxEnv))
+	copy(sandboxEnv, e.config.SandboxEnv)
+
+	agentName := e.resolveAgentName(sessionAgent)
+	if agentName != "" {
+		sandboxEnv = append(sandboxEnv, "TELECODER_CODING_AGENT="+agentName)
+	}
+	return sandboxEnv
+}
+
+// --- Multi-step persistent container helpers ---
+
+// writeProgressFile writes .telecoder-progress.json into the sandbox container.
+func (e *Engine) writeProgressFile(ctx context.Context, containerID string, statuses []pipeline.SubTaskStatus) error {
+	data, err := pipeline.FormatProgressJSON(statuses)
+	if err != nil {
+		return err
+	}
+
+	cmd := fmt.Sprintf("cat > /workspace/repo/.telecoder-progress.json << 'PROGRESS_EOF'\n%s\nPROGRESS_EOF", data)
+	_, err = e.sandbox.ExecCollect(ctx, containerID, []string{"bash", "-c", cmd})
+	return err
+}
+
+// checkpointSubTask commits all current changes in the sandbox container with a
+// descriptive message and returns the commit hash.
+func (e *Engine) checkpointSubTask(ctx context.Context, containerID, title string, index int) (string, error) {
+	// Stage all changes.
+	_, err := e.sandbox.ExecCollect(ctx, containerID, []string{
+		"bash", "-c", "cd /workspace/repo && git add -A",
+	})
+	if err != nil {
+		return "", fmt.Errorf("git add: %w", err)
+	}
+
+	// Check if there are changes to commit.
+	_, err = e.sandbox.ExecCollect(ctx, containerID, []string{
+		"bash", "-c", "cd /workspace/repo && git diff --cached --quiet",
+	})
+	if err == nil {
+		// No changes to commit. Return current HEAD.
+		hash, _ := e.sandbox.ExecCollect(ctx, containerID, []string{
+			"bash", "-c", "cd /workspace/repo && git rev-parse HEAD",
+		})
+		return strings.TrimSpace(hash), nil
+	}
+
+	// Commit.
+	commitMsg := fmt.Sprintf("telecoder: step %d — %s", index+1, title)
+	_, err = e.sandbox.ExecCollect(ctx, containerID, []string{
+		"bash", "-c", fmt.Sprintf("cd /workspace/repo && git commit -m %q", commitMsg),
+	})
+	if err != nil {
+		return "", fmt.Errorf("git commit: %w", err)
+	}
+
+	hash, err := e.sandbox.ExecCollect(ctx, containerID, []string{
+		"bash", "-c", "cd /workspace/repo && git rev-parse HEAD",
+	})
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse: %w", err)
+	}
+	return strings.TrimSpace(hash), nil
+}
+
+// preValidate runs the verify stage to check codebase health before starting
+// the next sub-task. Returns nil if no verify stage or no issues.
+func (e *Engine) preValidate(ctx context.Context, sess *model.Session, containerID, taskPrompt string) *pipeline.VerifyResult {
+	if e.verify == nil {
+		return nil
+	}
+
+	// Reuse the existing runVerify logic but with the persistent container.
+	return e.runVerify(ctx, sess, containerID, taskPrompt)
+}
+
+// rollbackToCheckpoint resets the sandbox repo to the given commit hash.
+func (e *Engine) rollbackToCheckpoint(ctx context.Context, containerID, commitHash string) error {
+	_, err := e.sandbox.ExecCollect(ctx, containerID, []string{
+		"bash", "-c", fmt.Sprintf("cd /workspace/repo && git reset --hard %s", commitHash),
+	})
+	return err
+}
+
+// runAgentInContainer runs the coding agent inside an already-running persistent
+// container with the given prompt. Returns collected output lines.
+func (e *Engine) runAgentInContainer(ctx context.Context, sess *model.Session, containerID, prompt string) ([]string, error) {
+	agentCmd := e.chatAgentCommand(sess.Agent, prompt)
+	agentStream, err := e.sandbox.Exec(ctx, containerID, []string{
+		"bash", "-c", agentCmd,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("agent exec failed: %w", err)
+	}
+
+	var outputLines []string
+	for agentStream.Scan() {
+		line := agentStream.Text()
+		outputLines = append(outputLines, line)
+		e.emitEvent(sess.ID, "output", line)
+	}
+	agentStream.Close()
+
+	return outputLines, nil
+}
+
+// pushBranch pushes the current branch from the persistent container.
+func (e *Engine) pushBranch(ctx context.Context, containerID, branch string) error {
+	_, err := e.sandbox.ExecCollect(ctx, containerID, []string{
+		"bash", "-c", fmt.Sprintf("cd /workspace/repo && git push -u origin %s", branch),
+	})
+	return err
+}
+
+// hasUncommittedChanges stages all changes and returns true if there are diffs.
+func (e *Engine) hasUncommittedChanges(ctx context.Context, containerID string) bool {
+	_, err := e.sandbox.ExecCollect(ctx, containerID, []string{
+		"bash", "-c", "cd /workspace/repo && git add -A && git diff --cached --quiet",
+	})
+	// If exit code is non-zero, there are changes.
+	return err != nil
+}
+
 // --- Task session execution ---
 
 type sandboxRoundResult struct {
@@ -498,11 +628,19 @@ func (e *Engine) runSession(sessionID string) {
 	if e.decompose != nil {
 		e.emitEvent(sess.ID, "status", "Analyzing task complexity...")
 		pCtx := &pipeline.Context{Ctx: ctx, Prompt: sess.Prompt, RepoCtx: repoContext}
-		if err := e.decompose.Execute(pCtx); err != nil {
+		maxST := e.config.MaxSubTasks
+		if maxST == 0 {
+			maxST = 5
+		}
+		if err := e.decompose.ExecuteWithMaxSubTasks(pCtx, maxST); err != nil {
 			log.Printf("Task decomposition failed (treating as single task): %v", err)
 			subTasks = []pipeline.SubTask{{Title: "Complete task", Description: sess.Prompt}}
 		} else {
 			subTasks = pCtx.SubTasks
+			// Enforce max sub-tasks limit.
+			if len(subTasks) > maxST {
+				subTasks = subTasks[:maxST]
+			}
 		}
 		if len(subTasks) > 1 {
 			e.emitEvent(sess.ID, "status", fmt.Sprintf("Task decomposed into %d steps", len(subTasks)))
@@ -511,6 +649,18 @@ func (e *Engine) runSession(sessionID string) {
 		subTasks = []pipeline.SubTask{{Title: "Complete task", Description: sess.Prompt}}
 	}
 
+	// Single sub-task: use the existing fire-and-forget flow (unchanged).
+	if len(subTasks) <= 1 {
+		e.runSessionSingleTask(ctx, sess, subTasks, repoContext)
+		return
+	}
+
+	// Multiple sub-tasks: use persistent container with checkpoints.
+	e.runSessionMultiStep(ctx, sess, subTasks, repoContext)
+}
+
+// runSessionSingleTask handles the original fire-and-forget flow for single sub-tasks.
+func (e *Engine) runSessionSingleTask(ctx context.Context, sess *model.Session, subTasks []pipeline.SubTask, repoContext string) {
 	var lastResult *sandboxRoundResult
 	for i, task := range subTasks {
 		if len(subTasks) > 1 {
@@ -532,6 +682,264 @@ func (e *Engine) runSession(sessionID string) {
 		lastResult = result
 	}
 
+	e.finalizeSession(ctx, sess, lastResult)
+}
+
+// runSessionMultiStep handles multiple sub-tasks using a persistent container
+// with progress tracking, git checkpoints, pre-validation, and self-correction.
+func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, subTasks []pipeline.SubTask, repoContext string) {
+	// Initialize progress tracking.
+	statuses := make([]pipeline.SubTaskStatus, len(subTasks))
+	for i, t := range subTasks {
+		statuses[i] = pipeline.SubTaskStatus{
+			Title:       t.Title,
+			Description: t.Description,
+			Status:      "pending",
+		}
+	}
+
+	// Start persistent container (like chat mode).
+	e.emitEvent(sess.ID, "status", "Starting persistent sandbox for multi-step task...")
+
+	containerID, err := e.sandbox.Start(ctx, sandbox.StartOptions{
+		SessionID:  sess.ID,
+		Repo:       sess.Repo,
+		Branch:     sess.Branch,
+		Persistent: true,
+		Image:      e.config.DockerImage,
+		Env:        e.buildSandboxEnv(sess.Agent),
+		Network:    e.config.DockerNetwork,
+	})
+	if err != nil {
+		e.failSession(sess, fmt.Sprintf("failed to start persistent sandbox: %v", err))
+		return
+	}
+
+	sess.ContainerID = containerID
+	sess.Status = model.StatusRunning
+	e.store.UpdateSession(sess)
+
+	// Run setup.sh to clone repo and install deps.
+	e.emitEvent(sess.ID, "status", "Setting up repository...")
+	setupStream, err := e.sandbox.Exec(ctx, containerID, []string{"/setup.sh"})
+	if err != nil {
+		e.failSession(sess, fmt.Sprintf("failed to run setup: %v", err))
+		e.sandbox.Stop(ctx, containerID)
+		return
+	}
+	for setupStream.Scan() {
+		e.dispatchLogLine(sess.ID, setupStream.Text())
+	}
+	setupStream.Close()
+
+	// Add .telecoder-progress.json to .gitignore so it doesn't pollute the PR.
+	e.sandbox.ExecCollect(ctx, containerID, []string{
+		"bash", "-c", `cd /workspace/repo && grep -qxF '.telecoder-progress.json' .gitignore 2>/dev/null || echo '.telecoder-progress.json' >> .gitignore`,
+	})
+
+	var lastCheckpointHash string
+	anyCodeChanged := false
+
+	// Execute each sub-task.
+	for i, task := range subTasks {
+		e.emitEvent(sess.ID, "step", fmt.Sprintf("Step %d/%d: %s", i+1, len(subTasks), task.Title))
+		e.emitEvent(sess.ID, "progress", fmt.Sprintf(`{"step":%d,"total":%d,"title":%q,"status":"running"}`, i+1, len(subTasks), task.Title))
+
+		statuses[i].Status = "running"
+
+		// Write progress file to container.
+		if err := e.writeProgressFile(ctx, containerID, statuses); err != nil {
+			log.Printf("Failed to write progress file: %v", err)
+		}
+
+		// Pre-validation: if not the first step, run tests to validate previous work.
+		if i > 0 {
+			e.emitEvent(sess.ID, "status", "Pre-validating previous work...")
+			preResult := e.preValidate(ctx, sess, containerID, sess.Prompt)
+			if preResult != nil && !preResult.Passed {
+				e.emitEvent(sess.ID, "output", "## Pre-validation Failed\n"+preResult.Feedback)
+
+				// Self-correction: try one fix round.
+				e.emitEvent(sess.ID, "status", "Attempting self-correction...")
+				fixPrompt := fmt.Sprintf("Tests/lint failed after the previous step. Fix the following issues WITHOUT starting on the next task:\n\n%s", preResult.Feedback)
+				_, fixErr := e.runAgentInContainer(ctx, sess, containerID, fixPrompt)
+
+				if fixErr == nil {
+					// Re-check after correction.
+					recheck := e.preValidate(ctx, sess, containerID, sess.Prompt)
+					if recheck != nil && !recheck.Passed {
+						// Still broken — rollback to last checkpoint.
+						e.emitEvent(sess.ID, "status", "Self-correction failed, rolling back to last checkpoint")
+						if lastCheckpointHash != "" {
+							if rbErr := e.rollbackToCheckpoint(ctx, containerID, lastCheckpointHash); rbErr != nil {
+								log.Printf("Rollback failed: %v", rbErr)
+							}
+						}
+						// Mark previous step as failed (it was the one that broke things).
+						if i > 0 {
+							statuses[i-1].Status = "failed"
+						}
+					} else {
+						// Self-correction worked — checkpoint the fix.
+						e.emitEvent(sess.ID, "status", "Self-correction succeeded")
+						hash, cpErr := e.checkpointSubTask(ctx, containerID, "self-correction", i-1)
+						if cpErr == nil && hash != "" {
+							lastCheckpointHash = hash
+						}
+					}
+				} else {
+					// Fix attempt failed to run — rollback.
+					e.emitEvent(sess.ID, "status", "Self-correction agent failed, rolling back")
+					if lastCheckpointHash != "" {
+						e.rollbackToCheckpoint(ctx, containerID, lastCheckpointHash)
+					}
+					if i > 0 {
+						statuses[i-1].Status = "failed"
+					}
+				}
+			}
+		}
+
+		// Build progress-aware prompt.
+		progressCtx := pipeline.ProgressContext(statuses, i)
+
+		// Plan stage.
+		prompt := task.Description
+		var plan string
+		if e.plan != nil {
+			e.emitEvent(sess.ID, "status", fmt.Sprintf("Planning step %d/%d...", i+1, len(subTasks)))
+			pCtx := &pipeline.Context{
+				Ctx:     ctx,
+				Repo:    sess.Repo,
+				Prompt:  task.Description,
+				RepoCtx: repoContext,
+			}
+			if err := e.plan.Execute(pCtx); err != nil {
+				log.Printf("Planning failed for step %d (falling back): %v", i+1, err)
+			} else {
+				plan = pCtx.Plan
+				e.emitEvent(sess.ID, "output", "## Plan\n"+plan)
+				prompt = pipeline.EnrichPrompt(task.Description, plan)
+			}
+		}
+
+		// Prepend progress context.
+		if progressCtx != "" {
+			prompt = progressCtx + "\n\n" + prompt
+		}
+
+		// Run the agent in the persistent container.
+		e.emitEvent(sess.ID, "status", fmt.Sprintf("Running agent for step %d/%d...", i+1, len(subTasks)))
+		_, runErr := e.runAgentInContainer(ctx, sess, containerID, prompt)
+		if runErr != nil {
+			statuses[i].Status = "failed"
+			e.emitEvent(sess.ID, "status", fmt.Sprintf("Step %d/%d failed: %v", i+1, len(subTasks), runErr))
+			// Non-fatal: continue to next step.
+			e.emitEvent(sess.ID, "progress", fmt.Sprintf(`{"step":%d,"total":%d,"title":%q,"status":"failed"}`, i+1, len(subTasks), task.Title))
+			continue
+		}
+
+		// Post-verify: run tests after the agent finishes.
+		if e.verify != nil {
+			e.emitEvent(sess.ID, "status", "Verifying changes...")
+			verifyResult := e.runVerify(ctx, sess, containerID, task.Description)
+			if verifyResult != nil && !verifyResult.Passed {
+				e.emitEvent(sess.ID, "output", "## Verify Failed\n"+verifyResult.Feedback)
+				// One revision attempt.
+				revisePrompt := pipeline.RevisePrompt(task.Description, plan, "Tests/lint failed. Fix the following issues:\n\n"+verifyResult.Feedback)
+				_, _ = e.runAgentInContainer(ctx, sess, containerID, revisePrompt)
+			}
+		}
+
+		// Git checkpoint.
+		if e.hasUncommittedChanges(ctx, containerID) {
+			anyCodeChanged = true
+		}
+		hash, cpErr := e.checkpointSubTask(ctx, containerID, task.Title, i)
+		if cpErr != nil {
+			log.Printf("Checkpoint failed for step %d: %v", i+1, cpErr)
+		} else {
+			lastCheckpointHash = hash
+			statuses[i].CommitHash = hash
+		}
+
+		statuses[i].Status = "completed"
+
+		// Update progress file and emit progress event.
+		e.writeProgressFile(ctx, containerID, statuses)
+		e.emitEvent(sess.ID, "progress", fmt.Sprintf(`{"step":%d,"total":%d,"title":%q,"status":"completed"}`, i+1, len(subTasks), task.Title))
+	}
+
+	// Push branch and create PR (or store text result).
+	if anyCodeChanged {
+		e.emitEvent(sess.ID, "status", "Pushing branch...")
+		if err := e.pushBranch(ctx, containerID, sess.Branch); err != nil {
+			e.failSession(sess, fmt.Sprintf("failed to push branch: %v", err))
+			e.sandbox.Stop(ctx, containerID)
+			return
+		}
+
+		e.emitEvent(sess.ID, "status", "Creating pull request...")
+
+		defaultBranch, err := e.git.GetDefaultBranch(ctx, sess.Repo)
+		if err != nil {
+			defaultBranch = "main"
+		}
+
+		prTitle := fmt.Sprintf("telecoder: %s", model.Truncate(sess.Prompt, 72))
+		// Build a richer PR body showing step results.
+		prBody := fmt.Sprintf("## TeleCoder Session `%s`\n\n**Prompt:**\n> %s\n\n### Steps\n", sess.ID, sess.Prompt)
+		for j, s := range statuses {
+			icon := "✅"
+			if s.Status == "failed" {
+				icon = "❌"
+			} else if s.Status == "pending" {
+				icon = "⏳"
+			}
+			prBody += fmt.Sprintf("%d. %s **%s** — %s\n", j+1, icon, s.Title, s.Description)
+		}
+		prBody += "\n---\n*Created by [TeleCoder](https://github.com/jxucoder/TeleCoder)*"
+
+		prURL, prNumber, err := e.git.CreatePR(ctx, gitprovider.PROptions{
+			Repo:   sess.Repo,
+			Branch: sess.Branch,
+			Base:   defaultBranch,
+			Title:  prTitle,
+			Body:   prBody,
+		})
+		if err != nil {
+			e.failSession(sess, fmt.Sprintf("failed to create PR: %v", err))
+			e.sandbox.Stop(ctx, containerID)
+			return
+		}
+
+		sess.Status = model.StatusComplete
+		sess.PRUrl = prURL
+		sess.PRNumber = prNumber
+		sess.Result = model.Result{
+			Type:     model.ResultPR,
+			PRUrl:    prURL,
+			PRNumber: prNumber,
+		}
+		e.store.UpdateSession(sess)
+		e.emitEvent(sess.ID, "done", prURL)
+	} else {
+		// No code changed across any step — store as text result.
+		sess.Status = model.StatusComplete
+		sess.Result = model.Result{
+			Type:    model.ResultText,
+			Content: "All steps completed without code changes.",
+		}
+		e.store.UpdateSession(sess)
+		e.emitEvent(sess.ID, "done", "All steps completed without code changes.")
+	}
+
+	e.sandbox.Stop(ctx, containerID)
+}
+
+// finalizeSession handles the final output decision after sub-task(s) complete
+// in the single-task fire-and-forget flow.
+func (e *Engine) finalizeSession(ctx context.Context, sess *model.Session, lastResult *sandboxRoundResult) {
 	// Decide output based on the last sub-task's result type.
 	if lastResult != nil && lastResult.resultType == model.ResultText {
 		// Text result — no PR needed.
@@ -696,14 +1104,7 @@ func (e *Engine) runSandboxRound(ctx context.Context, sess *model.Session, promp
 func (e *Engine) runSandboxRoundWithAgent(ctx context.Context, sess *model.Session, prompt, sessionAgent string) (*sandboxRoundResult, error) {
 	e.emitEvent(sess.ID, "status", "Starting sandbox...")
 
-	// Build sandbox env with agent selection.
-	sandboxEnv := make([]string, len(e.config.SandboxEnv))
-	copy(sandboxEnv, e.config.SandboxEnv)
-
-	agentName := e.resolveAgentName(sessionAgent)
-	if agentName != "" {
-		sandboxEnv = append(sandboxEnv, "TELECODER_CODING_AGENT="+agentName)
-	}
+	sandboxEnv := e.buildSandboxEnv(sessionAgent)
 
 	containerID, err := e.sandbox.Start(ctx, sandbox.StartOptions{
 		SessionID: sess.ID,

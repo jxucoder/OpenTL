@@ -8,7 +8,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/jxucoder/TeleCoder/model"
+	"github.com/jxucoder/TeleCoder/pkg/model"
 )
 
 // Store manages session and event persistence in SQLite.

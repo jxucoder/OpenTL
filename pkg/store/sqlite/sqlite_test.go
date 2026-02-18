@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jxucoder/TeleCoder/model"
+	"github.com/jxucoder/TeleCoder/pkg/model"
 )
 
 func newTestStore(t *testing.T) *Store {

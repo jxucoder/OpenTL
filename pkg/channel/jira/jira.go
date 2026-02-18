@@ -25,9 +25,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/jxucoder/TeleCoder/eventbus"
-	"github.com/jxucoder/TeleCoder/model"
-	"github.com/jxucoder/TeleCoder/store"
+	"github.com/jxucoder/TeleCoder/pkg/eventbus"
+	"github.com/jxucoder/TeleCoder/pkg/model"
+	"github.com/jxucoder/TeleCoder/pkg/store"
 )
 
 // SessionCreator is the interface the engine implements for creating sessions.

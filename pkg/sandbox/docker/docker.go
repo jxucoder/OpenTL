@@ -10,7 +10,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/jxucoder/TeleCoder/sandbox"
+	"github.com/jxucoder/TeleCoder/pkg/sandbox"
 )
 
 // Runtime implements sandbox.Runtime using Docker.

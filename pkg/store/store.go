@@ -1,7 +1,7 @@
 // Package store defines the SessionStore interface for TeleCoder persistence.
 package store
 
-import "github.com/jxucoder/TeleCoder/model"
+import "github.com/jxucoder/TeleCoder/pkg/model"
 
 // SessionStore provides persistence for sessions, messages, and events.
 type SessionStore interface {
