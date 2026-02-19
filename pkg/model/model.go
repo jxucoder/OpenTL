@@ -51,7 +51,9 @@ type Session struct {
 	Mode        Mode      `json:"mode"`
 	Status      Status    `json:"status"`
 	Branch      string    `json:"branch"`
-	Agent       string    `json:"agent,omitempty"` // per-session agent override
+	Agent       string    `json:"agent,omitempty"`
+	ChainID     string    `json:"chain_id,omitempty"`
+	ChainDepth  int       `json:"chain_depth,omitempty"`
 	PRUrl       string    `json:"pr_url,omitempty"`
 	PRNumber    int       `json:"pr_number,omitempty"`
 	Result      Result    `json:"result"`
@@ -60,6 +62,9 @@ type Session struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
+
+// MaxChainDepth is the default maximum depth for agent chains to prevent loops.
+const MaxChainDepth = 3
 
 // Message represents a single message in a chat session.
 type Message struct {

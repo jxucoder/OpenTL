@@ -1,5 +1,5 @@
 // Package engine provides the session orchestration logic for TeleCoder.
-// It depends only on interfaces (store, sandbox, gitprovider, eventbus, pipeline).
+// It depends only on interfaces (store, sandbox, gitprovider, eventbus).
 package engine
 
 import (
@@ -13,11 +13,10 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/jxucoder/TeleCoder/pkg/agent"
 	"github.com/jxucoder/TeleCoder/pkg/eventbus"
 	"github.com/jxucoder/TeleCoder/pkg/gitprovider"
-	ghImpl "github.com/jxucoder/TeleCoder/pkg/gitprovider/github"
 	"github.com/jxucoder/TeleCoder/pkg/model"
-	"github.com/jxucoder/TeleCoder/pkg/pipeline"
 	"github.com/jxucoder/TeleCoder/pkg/sandbox"
 	"github.com/jxucoder/TeleCoder/pkg/store"
 )
@@ -42,15 +41,11 @@ type Config struct {
 
 // Engine orchestrates TeleCoder session lifecycle.
 type Engine struct {
-	config   Config
-	store    store.SessionStore
-	bus      eventbus.Bus
-	sandbox  sandbox.Runtime
-	git      gitprovider.Provider
-	plan     *pipeline.PlanStage
-	review   *pipeline.ReviewStage
-	decompose *pipeline.DecomposeStage
-	verify   *pipeline.VerifyStage
+	config  Config
+	store   store.SessionStore
+	bus     eventbus.Bus
+	sandbox sandbox.Runtime
+	git     gitprovider.Provider
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -64,21 +59,13 @@ func New(
 	bus eventbus.Bus,
 	sb sandbox.Runtime,
 	git gitprovider.Provider,
-	plan *pipeline.PlanStage,
-	review *pipeline.ReviewStage,
-	decompose *pipeline.DecomposeStage,
-	verify *pipeline.VerifyStage,
 ) *Engine {
 	return &Engine{
-		config:    cfg,
-		store:     st,
-		bus:       bus,
-		sandbox:   sb,
-		git:       git,
-		plan:      plan,
-		review:    review,
-		decompose: decompose,
-		verify:    verify,
+		config:  cfg,
+		store:   st,
+		bus:     bus,
+		sandbox: sb,
+		git:     git,
 	}
 }
 
@@ -436,7 +423,7 @@ func (e *Engine) CreatePRFromChat(sessionID string) (string, int, error) {
 
 // --- Agent helpers ---
 
-// resolveAgentName returns the agent name for the sandbox.
+// resolveAgentName returns the agent name for the sandbox env var.
 // Per-session override takes priority, then the global Agent config.
 // Returns "" for "auto" (let entrypoint decide based on API keys).
 func (e *Engine) resolveAgentName(sessionAgent string) string {
@@ -450,18 +437,10 @@ func (e *Engine) resolveAgentName(sessionAgent string) string {
 }
 
 // chatAgentCommand returns the shell command to run for a chat message,
-// selecting the correct agent binary based on the session/config agent setting.
+// using the CodingAgent interface for command generation.
 func (e *Engine) chatAgentCommand(sessionAgent, content string) string {
-	agent := e.resolveAgentName(sessionAgent)
-	switch agent {
-	case "claude-code":
-		return fmt.Sprintf("cd /workspace/repo && claude --print %q 2>&1", content)
-	case "codex":
-		return fmt.Sprintf("cd /workspace/repo && codex exec --full-auto --ephemeral %q 2>&1", content)
-	default:
-		// "opencode" or "" (auto fallback).
-		return fmt.Sprintf("cd /workspace/repo && opencode -p %q 2>&1", content)
-	}
+	name := e.resolveAgentName(sessionAgent)
+	return agent.Resolve(name).Command(content)
 }
 
 // --- Sandbox env helper ---
@@ -481,8 +460,8 @@ func (e *Engine) buildSandboxEnv(sessionAgent string) []string {
 // --- Multi-step persistent container helpers ---
 
 // writeProgressFile writes .telecoder-progress.json into the sandbox container.
-func (e *Engine) writeProgressFile(ctx context.Context, containerID string, statuses []pipeline.SubTaskStatus) error {
-	data, err := pipeline.FormatProgressJSON(statuses)
+func (e *Engine) writeProgressFile(ctx context.Context, containerID string, statuses []model.SubTaskStatus) error {
+	data, err := model.FormatProgressJSON(statuses)
 	if err != nil {
 		return err
 	}
@@ -495,7 +474,6 @@ func (e *Engine) writeProgressFile(ctx context.Context, containerID string, stat
 // checkpointSubTask commits all current changes in the sandbox container with a
 // descriptive message and returns the commit hash.
 func (e *Engine) checkpointSubTask(ctx context.Context, containerID, title string, index int) (string, error) {
-	// Stage all changes.
 	_, err := e.sandbox.ExecCollect(ctx, containerID, []string{
 		"bash", "-c", "cd /workspace/repo && git add -A",
 	})
@@ -503,19 +481,16 @@ func (e *Engine) checkpointSubTask(ctx context.Context, containerID, title strin
 		return "", fmt.Errorf("git add: %w", err)
 	}
 
-	// Check if there are changes to commit.
 	_, err = e.sandbox.ExecCollect(ctx, containerID, []string{
 		"bash", "-c", "cd /workspace/repo && git diff --cached --quiet",
 	})
 	if err == nil {
-		// No changes to commit. Return current HEAD.
 		hash, _ := e.sandbox.ExecCollect(ctx, containerID, []string{
 			"bash", "-c", "cd /workspace/repo && git rev-parse HEAD",
 		})
 		return strings.TrimSpace(hash), nil
 	}
 
-	// Commit.
 	commitMsg := fmt.Sprintf("telecoder: step %d — %s", index+1, title)
 	_, err = e.sandbox.ExecCollect(ctx, containerID, []string{
 		"bash", "-c", fmt.Sprintf("cd /workspace/repo && git commit -m %q", commitMsg),
@@ -533,14 +508,9 @@ func (e *Engine) checkpointSubTask(ctx context.Context, containerID, title strin
 	return strings.TrimSpace(hash), nil
 }
 
-// preValidate runs the verify stage to check codebase health before starting
-// the next sub-task. Returns nil if no verify stage or no issues.
-func (e *Engine) preValidate(ctx context.Context, sess *model.Session, containerID, taskPrompt string) *pipeline.VerifyResult {
-	if e.verify == nil {
-		return nil
-	}
-
-	// Reuse the existing runVerify logic but with the persistent container.
+// preValidate runs verify commands to check codebase health before starting
+// the next sub-task. Returns nil if no issues.
+func (e *Engine) preValidate(ctx context.Context, sess *model.Session, containerID, taskPrompt string) *sandbox.VerifyResult {
 	return e.runVerify(ctx, sess, containerID, taskPrompt)
 }
 
@@ -587,7 +557,6 @@ func (e *Engine) hasUncommittedChanges(ctx context.Context, containerID string) 
 	_, err := e.sandbox.ExecCollect(ctx, containerID, []string{
 		"bash", "-c", "cd /workspace/repo && git add -A && git diff --cached --quiet",
 	})
-	// If exit code is non-zero, there are changes.
 	return err != nil
 }
 
@@ -612,62 +581,19 @@ func (e *Engine) runSession(sessionID string) {
 		return
 	}
 
-	var repoContext string
-
-	e.emitEvent(sess.ID, "status", "Indexing repository...")
-	rc, err := e.git.IndexRepo(ctx, sess.Repo)
-	if err != nil {
-		log.Printf("Repo indexing failed (proceeding without context): %v", err)
-		e.emitEvent(sess.ID, "status", "Repo indexing failed, proceeding without context")
-	} else {
-		repoContext = ghImpl.FormatRepoContext(rc)
-		e.emitEvent(sess.ID, "status", "Repository indexed")
-	}
-
-	var subTasks []pipeline.SubTask
-	if e.decompose != nil {
-		e.emitEvent(sess.ID, "status", "Analyzing task complexity...")
-		pCtx := &pipeline.Context{Ctx: ctx, Prompt: sess.Prompt, RepoCtx: repoContext}
-		maxST := e.config.MaxSubTasks
-		if maxST == 0 {
-			maxST = 5
-		}
-		if err := e.decompose.ExecuteWithMaxSubTasks(pCtx, maxST); err != nil {
-			log.Printf("Task decomposition failed (treating as single task): %v", err)
-			subTasks = []pipeline.SubTask{{Title: "Complete task", Description: sess.Prompt}}
-		} else {
-			subTasks = pCtx.SubTasks
-			// Enforce max sub-tasks limit.
-			if len(subTasks) > maxST {
-				subTasks = subTasks[:maxST]
-			}
-		}
-		if len(subTasks) > 1 {
-			e.emitEvent(sess.ID, "status", fmt.Sprintf("Task decomposed into %d steps", len(subTasks)))
-		}
-	} else {
-		subTasks = []pipeline.SubTask{{Title: "Complete task", Description: sess.Prompt}}
-	}
-
-	// Single sub-task: use the existing fire-and-forget flow (unchanged).
-	if len(subTasks) <= 1 {
-		e.runSessionSingleTask(ctx, sess, subTasks, repoContext)
-		return
-	}
-
-	// Multiple sub-tasks: use persistent container with checkpoints.
-	e.runSessionMultiStep(ctx, sess, subTasks, repoContext)
+	subTasks := []model.SubTask{{Title: "Complete task", Description: sess.Prompt}}
+	e.runSessionSingleTask(ctx, sess, subTasks)
 }
 
-// runSessionSingleTask handles the original fire-and-forget flow for single sub-tasks.
-func (e *Engine) runSessionSingleTask(ctx context.Context, sess *model.Session, subTasks []pipeline.SubTask, repoContext string) {
+// runSessionSingleTask handles the fire-and-forget flow for sub-tasks.
+func (e *Engine) runSessionSingleTask(ctx context.Context, sess *model.Session, subTasks []model.SubTask) {
 	var lastResult *sandboxRoundResult
 	for i, task := range subTasks {
 		if len(subTasks) > 1 {
 			e.emitEvent(sess.ID, "step", fmt.Sprintf("Step %d/%d: %s", i+1, len(subTasks), task.Title))
 		}
 
-		result, err := e.runSubTask(ctx, sess, task.Description, repoContext, sess.Agent)
+		result, err := e.runSubTask(ctx, sess, task.Description, sess.Agent)
 		if err != nil {
 			e.failSession(sess, fmt.Sprintf("step %d/%d failed: %v", i+1, len(subTasks), err))
 			if lastResult != nil {
@@ -687,18 +613,16 @@ func (e *Engine) runSessionSingleTask(ctx context.Context, sess *model.Session, 
 
 // runSessionMultiStep handles multiple sub-tasks using a persistent container
 // with progress tracking, git checkpoints, pre-validation, and self-correction.
-func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, subTasks []pipeline.SubTask, repoContext string) {
-	// Initialize progress tracking.
-	statuses := make([]pipeline.SubTaskStatus, len(subTasks))
+func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, subTasks []model.SubTask) {
+	statuses := make([]model.SubTaskStatus, len(subTasks))
 	for i, t := range subTasks {
-		statuses[i] = pipeline.SubTaskStatus{
+		statuses[i] = model.SubTaskStatus{
 			Title:       t.Title,
 			Description: t.Description,
 			Status:      "pending",
 		}
 	}
 
-	// Start persistent container (like chat mode).
 	e.emitEvent(sess.ID, "status", "Starting persistent sandbox for multi-step task...")
 
 	containerID, err := e.sandbox.Start(ctx, sandbox.StartOptions{
@@ -719,7 +643,6 @@ func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, s
 	sess.Status = model.StatusRunning
 	e.store.UpdateSession(sess)
 
-	// Run setup.sh to clone repo and install deps.
 	e.emitEvent(sess.ID, "status", "Setting up repository...")
 	setupStream, err := e.sandbox.Exec(ctx, containerID, []string{"/setup.sh"})
 	if err != nil {
@@ -732,7 +655,6 @@ func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, s
 	}
 	setupStream.Close()
 
-	// Add .telecoder-progress.json to .gitignore so it doesn't pollute the PR.
 	e.sandbox.ExecCollect(ctx, containerID, []string{
 		"bash", "-c", `cd /workspace/repo && grep -qxF '.telecoder-progress.json' .gitignore 2>/dev/null || echo '.telecoder-progress.json' >> .gitignore`,
 	})
@@ -740,47 +662,39 @@ func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, s
 	var lastCheckpointHash string
 	anyCodeChanged := false
 
-	// Execute each sub-task.
 	for i, task := range subTasks {
 		e.emitEvent(sess.ID, "step", fmt.Sprintf("Step %d/%d: %s", i+1, len(subTasks), task.Title))
 		e.emitEvent(sess.ID, "progress", fmt.Sprintf(`{"step":%d,"total":%d,"title":%q,"status":"running"}`, i+1, len(subTasks), task.Title))
 
 		statuses[i].Status = "running"
 
-		// Write progress file to container.
 		if err := e.writeProgressFile(ctx, containerID, statuses); err != nil {
 			log.Printf("Failed to write progress file: %v", err)
 		}
 
-		// Pre-validation: if not the first step, run tests to validate previous work.
 		if i > 0 {
 			e.emitEvent(sess.ID, "status", "Pre-validating previous work...")
 			preResult := e.preValidate(ctx, sess, containerID, sess.Prompt)
 			if preResult != nil && !preResult.Passed {
 				e.emitEvent(sess.ID, "output", "## Pre-validation Failed\n"+preResult.Feedback)
 
-				// Self-correction: try one fix round.
 				e.emitEvent(sess.ID, "status", "Attempting self-correction...")
 				fixPrompt := fmt.Sprintf("Tests/lint failed after the previous step. Fix the following issues WITHOUT starting on the next task:\n\n%s", preResult.Feedback)
 				_, fixErr := e.runAgentInContainer(ctx, sess, containerID, fixPrompt)
 
 				if fixErr == nil {
-					// Re-check after correction.
 					recheck := e.preValidate(ctx, sess, containerID, sess.Prompt)
 					if recheck != nil && !recheck.Passed {
-						// Still broken — rollback to last checkpoint.
 						e.emitEvent(sess.ID, "status", "Self-correction failed, rolling back to last checkpoint")
 						if lastCheckpointHash != "" {
 							if rbErr := e.rollbackToCheckpoint(ctx, containerID, lastCheckpointHash); rbErr != nil {
 								log.Printf("Rollback failed: %v", rbErr)
 							}
 						}
-						// Mark previous step as failed (it was the one that broke things).
 						if i > 0 {
 							statuses[i-1].Status = "failed"
 						}
 					} else {
-						// Self-correction worked — checkpoint the fix.
 						e.emitEvent(sess.ID, "status", "Self-correction succeeded")
 						hash, cpErr := e.checkpointSubTask(ctx, containerID, "self-correction", i-1)
 						if cpErr == nil && hash != "" {
@@ -788,7 +702,6 @@ func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, s
 						}
 					}
 				} else {
-					// Fix attempt failed to run — rollback.
 					e.emitEvent(sess.ID, "status", "Self-correction agent failed, rolling back")
 					if lastCheckpointHash != "" {
 						e.rollbackToCheckpoint(ctx, containerID, lastCheckpointHash)
@@ -800,58 +713,30 @@ func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, s
 			}
 		}
 
-		// Build progress-aware prompt.
-		progressCtx := pipeline.ProgressContext(statuses, i)
+		progressCtx := model.ProgressContext(statuses, i)
 
-		// Plan stage.
 		prompt := task.Description
-		var plan string
-		if e.plan != nil {
-			e.emitEvent(sess.ID, "status", fmt.Sprintf("Planning step %d/%d...", i+1, len(subTasks)))
-			pCtx := &pipeline.Context{
-				Ctx:     ctx,
-				Repo:    sess.Repo,
-				Prompt:  task.Description,
-				RepoCtx: repoContext,
-			}
-			if err := e.plan.Execute(pCtx); err != nil {
-				log.Printf("Planning failed for step %d (falling back): %v", i+1, err)
-			} else {
-				plan = pCtx.Plan
-				e.emitEvent(sess.ID, "output", "## Plan\n"+plan)
-				prompt = pipeline.EnrichPrompt(task.Description, plan)
-			}
-		}
-
-		// Prepend progress context.
 		if progressCtx != "" {
 			prompt = progressCtx + "\n\n" + prompt
 		}
 
-		// Run the agent in the persistent container.
 		e.emitEvent(sess.ID, "status", fmt.Sprintf("Running agent for step %d/%d...", i+1, len(subTasks)))
 		_, runErr := e.runAgentInContainer(ctx, sess, containerID, prompt)
 		if runErr != nil {
 			statuses[i].Status = "failed"
 			e.emitEvent(sess.ID, "status", fmt.Sprintf("Step %d/%d failed: %v", i+1, len(subTasks), runErr))
-			// Non-fatal: continue to next step.
 			e.emitEvent(sess.ID, "progress", fmt.Sprintf(`{"step":%d,"total":%d,"title":%q,"status":"failed"}`, i+1, len(subTasks), task.Title))
 			continue
 		}
 
-		// Post-verify: run tests after the agent finishes.
-		if e.verify != nil {
-			e.emitEvent(sess.ID, "status", "Verifying changes...")
-			verifyResult := e.runVerify(ctx, sess, containerID, task.Description)
-			if verifyResult != nil && !verifyResult.Passed {
-				e.emitEvent(sess.ID, "output", "## Verify Failed\n"+verifyResult.Feedback)
-				// One revision attempt.
-				revisePrompt := pipeline.RevisePrompt(task.Description, plan, "Tests/lint failed. Fix the following issues:\n\n"+verifyResult.Feedback)
-				_, _ = e.runAgentInContainer(ctx, sess, containerID, revisePrompt)
-			}
+		e.emitEvent(sess.ID, "status", "Verifying changes...")
+		verifyResult := e.runVerify(ctx, sess, containerID, task.Description)
+		if verifyResult != nil && !verifyResult.Passed {
+			e.emitEvent(sess.ID, "output", "## Verify Failed\n"+verifyResult.Feedback)
+			revisePrompt := fmt.Sprintf("Tests/lint failed. Fix the following issues:\n\n%s\n\nKeep changes minimal and focused.", verifyResult.Feedback)
+			_, _ = e.runAgentInContainer(ctx, sess, containerID, revisePrompt)
 		}
 
-		// Git checkpoint.
 		if e.hasUncommittedChanges(ctx, containerID) {
 			anyCodeChanged = true
 		}
@@ -865,12 +750,10 @@ func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, s
 
 		statuses[i].Status = "completed"
 
-		// Update progress file and emit progress event.
 		e.writeProgressFile(ctx, containerID, statuses)
 		e.emitEvent(sess.ID, "progress", fmt.Sprintf(`{"step":%d,"total":%d,"title":%q,"status":"completed"}`, i+1, len(subTasks), task.Title))
 	}
 
-	// Push branch and create PR (or store text result).
 	if anyCodeChanged {
 		e.emitEvent(sess.ID, "status", "Pushing branch...")
 		if err := e.pushBranch(ctx, containerID, sess.Branch); err != nil {
@@ -887,7 +770,6 @@ func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, s
 		}
 
 		prTitle := fmt.Sprintf("telecoder: %s", model.Truncate(sess.Prompt, 72))
-		// Build a richer PR body showing step results.
 		prBody := fmt.Sprintf("## TeleCoder Session `%s`\n\n**Prompt:**\n> %s\n\n### Steps\n", sess.ID, sess.Prompt)
 		for j, s := range statuses {
 			icon := "✅"
@@ -924,7 +806,6 @@ func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, s
 		e.store.UpdateSession(sess)
 		e.emitEvent(sess.ID, "done", prURL)
 	} else {
-		// No code changed across any step — store as text result.
 		sess.Status = model.StatusComplete
 		sess.Result = model.Result{
 			Type:    model.ResultText,
@@ -940,9 +821,7 @@ func (e *Engine) runSessionMultiStep(ctx context.Context, sess *model.Session, s
 // finalizeSession handles the final output decision after sub-task(s) complete
 // in the single-task fire-and-forget flow.
 func (e *Engine) finalizeSession(ctx context.Context, sess *model.Session, lastResult *sandboxRoundResult) {
-	// Decide output based on the last sub-task's result type.
 	if lastResult != nil && lastResult.resultType == model.ResultText {
-		// Text result — no PR needed.
 		content := strings.Join(lastResult.outputLines, "\n")
 		sess.Status = model.StatusComplete
 		sess.Result = model.Result{
@@ -952,7 +831,6 @@ func (e *Engine) finalizeSession(ctx context.Context, sess *model.Session, lastR
 		e.store.UpdateSession(sess)
 		e.emitEvent(sess.ID, "done", content)
 	} else {
-		// PR result — existing flow.
 		e.emitEvent(sess.ID, "status", "Creating pull request...")
 
 		defaultBranch, err := e.git.GetDefaultBranch(ctx, sess.Repo)
@@ -994,27 +872,7 @@ func (e *Engine) finalizeSession(ctx context.Context, sess *model.Session, lastR
 	}
 }
 
-func (e *Engine) runSubTask(ctx context.Context, sess *model.Session, taskPrompt, repoContext, sessionAgent string) (*sandboxRoundResult, error) {
-	prompt := taskPrompt
-	var plan string
-	if e.plan != nil {
-		e.emitEvent(sess.ID, "status", "Planning task...")
-		pCtx := &pipeline.Context{
-			Ctx:     ctx,
-			Repo:    sess.Repo,
-			Prompt:  taskPrompt,
-			RepoCtx: repoContext,
-		}
-		if err := e.plan.Execute(pCtx); err != nil {
-			log.Printf("Planning failed (falling back to direct prompt): %v", err)
-			e.emitEvent(sess.ID, "status", "Planning failed, using direct prompt")
-		} else {
-			plan = pCtx.Plan
-			e.emitEvent(sess.ID, "output", "## Plan\n"+plan)
-			prompt = pipeline.EnrichPrompt(taskPrompt, plan)
-		}
-	}
-
+func (e *Engine) runSubTask(ctx context.Context, sess *model.Session, taskPrompt, sessionAgent string) (*sandboxRoundResult, error) {
 	maxRounds := e.config.MaxRevisions
 	var lastResult *sandboxRoundResult
 
@@ -1023,7 +881,7 @@ func (e *Engine) runSubTask(ctx context.Context, sess *model.Session, taskPrompt
 			e.emitEvent(sess.ID, "status", fmt.Sprintf("Starting revision round %d/%d...", round, maxRounds))
 		}
 
-		result, err := e.runSandboxRoundWithAgent(ctx, sess, prompt, sessionAgent)
+		result, err := e.runSandboxRoundWithAgent(ctx, sess, taskPrompt, sessionAgent)
 		if err != nil {
 			return lastResult, err
 		}
@@ -1041,57 +899,22 @@ func (e *Engine) runSubTask(ctx context.Context, sess *model.Session, taskPrompt
 			return lastResult, fmt.Errorf("%s", errMsg)
 		}
 
-		// Text results don't need verify or review.
 		if result.resultType == model.ResultText {
 			return lastResult, nil
 		}
 
-		// Run verify (test/lint) if configured.
-		if e.verify != nil {
-			verifyResult := e.runVerify(ctx, sess, result.containerID, taskPrompt)
-			if verifyResult != nil && !verifyResult.Passed {
-				e.emitEvent(sess.ID, "output", "## Verify Failed\n"+verifyResult.Feedback)
-				if round >= maxRounds {
-					e.emitEvent(sess.ID, "status", fmt.Sprintf("Tests/lint failed but max revision rounds (%d) reached, proceeding", maxRounds))
-				} else {
-					prompt = pipeline.RevisePrompt(taskPrompt, plan, "Tests/lint failed. Fix the following issues:\n\n"+verifyResult.Feedback)
-					continue
-				}
+		verifyResult := e.runVerify(ctx, sess, result.containerID, taskPrompt)
+		if verifyResult != nil && !verifyResult.Passed {
+			e.emitEvent(sess.ID, "output", "## Verify Failed\n"+verifyResult.Feedback)
+			if round >= maxRounds {
+				e.emitEvent(sess.ID, "status", fmt.Sprintf("Tests/lint failed but max revision rounds (%d) reached, proceeding", maxRounds))
+			} else {
+				taskPrompt = fmt.Sprintf("%s\n\n## Revision\nTests/lint failed. Fix the following issues:\n\n%s", taskPrompt, verifyResult.Feedback)
+				continue
 			}
 		}
 
-		// Review the changes via LLM.
-		if e.review == nil || plan == "" {
-			break
-		}
-
-		e.emitEvent(sess.ID, "status", "Reviewing changes...")
-		diff := e.getDiffFromContainer(ctx, result.containerID)
-		if diff == "" {
-			e.emitEvent(sess.ID, "status", "No diff found, skipping review")
-			break
-		}
-
-		review, err := e.review.Review(ctx, taskPrompt, plan, diff)
-		if err != nil {
-			log.Printf("Review failed (proceeding): %v", err)
-			e.emitEvent(sess.ID, "status", "Review failed, proceeding")
-			break
-		}
-
-		if review.Approved {
-			e.emitEvent(sess.ID, "output", "## Review\n"+review.Feedback)
-			break
-		}
-
-		e.emitEvent(sess.ID, "output", "## Review Feedback\n"+review.Feedback)
-
-		if round >= maxRounds {
-			e.emitEvent(sess.ID, "status", fmt.Sprintf("Max revision rounds (%d) reached, proceeding", maxRounds))
-			break
-		}
-
-		prompt = pipeline.RevisePrompt(taskPrompt, plan, review.Feedback)
+		break
 	}
 
 	return lastResult, nil
@@ -1130,26 +953,31 @@ func (e *Engine) runSandboxRoundWithAgent(ctx context.Context, sess *model.Sessi
 	}
 	defer logStream.Close()
 
+	a := agent.Resolve(e.resolveAgentName(sessionAgent))
 	var lastLine string
 	var resultType model.ResultType
 	var outputLines []string
 	for logStream.Scan() {
 		line := logStream.Text()
 		lastLine = line
-		e.dispatchLogLine(sess.ID, line)
-		switch {
-		case strings.HasPrefix(line, "###TELECODER_DONE### "):
-			sess.Branch = strings.TrimPrefix(line, "###TELECODER_DONE### ")
-			resultType = model.ResultPR
-		case strings.HasPrefix(line, "###TELECODER_RESULT### "):
-			payload := strings.TrimPrefix(line, "###TELECODER_RESULT### ")
-			var parsed struct {
-				Type string `json:"type"`
+		ev := a.ParseEvent(line)
+		if ev != nil {
+			ev.SessionID = sess.ID
+			e.emitParsedEvent(sess.ID, ev)
+			switch ev.Type {
+			case "done":
+				sess.Branch = ev.Data
+				resultType = model.ResultPR
+			case "result":
+				var parsed struct {
+					Type string `json:"type"`
+				}
+				if err := json.Unmarshal([]byte(ev.Data), &parsed); err == nil {
+					resultType = model.ResultType(parsed.Type)
+				}
 			}
-			if err := json.Unmarshal([]byte(payload), &parsed); err == nil {
-				resultType = model.ResultType(parsed.Type)
-			}
-		case !strings.HasPrefix(line, "###TELECODER_"):
+		} else {
+			e.emitEvent(sess.ID, "output", line)
 			outputLines = append(outputLines, line)
 		}
 	}
@@ -1168,10 +996,9 @@ func (e *Engine) runSandboxRoundWithAgent(ctx context.Context, sess *model.Sessi
 	}, nil
 }
 
-func (e *Engine) runVerify(ctx context.Context, sess *model.Session, containerID, taskPrompt string) *pipeline.VerifyResult {
+func (e *Engine) runVerify(ctx context.Context, sess *model.Session, containerID, taskPrompt string) *sandbox.VerifyResult {
 	e.emitEvent(sess.ID, "status", "Running tests and linting...")
 
-	// Detect which files exist to pick the right test/lint commands.
 	probeFiles := []string{
 		"go.mod", "package.json", "Cargo.toml", "requirements.txt",
 		"pyproject.toml", "setup.py", "Makefile",
@@ -1187,53 +1014,39 @@ func (e *Engine) runVerify(ctx context.Context, sess *model.Session, containerID
 		}
 	}
 
-	cmds := pipeline.DetectVerifyCommands(existing)
+	cmds := sandbox.DetectVerifyCommands(existing)
 	if len(cmds) == 0 {
 		e.emitEvent(sess.ID, "status", "No test/lint commands detected, skipping verify")
 		return nil
 	}
 
-	// Run all verify commands and collect output.
 	var allOutput strings.Builder
+	anyFailed := false
 	for _, cmd := range cmds {
-		output, _ := e.sandbox.ExecCollect(ctx, containerID, []string{
+		output, err := e.sandbox.ExecCollect(ctx, containerID, []string{
 			"bash", "-c", "cd /workspace/repo && " + cmd,
 		})
 		if output != "" {
 			allOutput.WriteString(output)
 			allOutput.WriteString("\n")
 		}
+		if err != nil {
+			anyFailed = true
+		}
 	}
 
-	pCtx := &pipeline.Context{
-		Ctx:    ctx,
-		Prompt: taskPrompt,
-	}
-
-	result, err := e.verify.Verify(pCtx, allOutput.String())
-	if err != nil {
-		log.Printf("Verify analysis failed (proceeding): %v", err)
-		e.emitEvent(sess.ID, "status", "Verify analysis failed, proceeding")
-		return nil
-	}
-
-	if result.Passed {
+	passed := !anyFailed
+	if passed {
 		e.emitEvent(sess.ID, "status", "Tests and linting passed")
 	} else {
 		e.emitEvent(sess.ID, "status", "Tests or linting failed")
 	}
 
-	return result
-}
-
-func (e *Engine) getDiffFromContainer(ctx context.Context, containerID string) string {
-	output, err := e.sandbox.ExecCollect(ctx, containerID, []string{
-		"git", "-C", "/workspace/repo", "diff", "HEAD~1",
-	})
-	if err != nil {
-		return ""
+	return &sandbox.VerifyResult{
+		Passed:   passed,
+		Output:   allOutput.String(),
+		Feedback: allOutput.String(),
 	}
-	return output
 }
 
 // CreatePRCommentSession creates a new task session that addresses a PR comment.
@@ -1297,27 +1110,7 @@ func (e *Engine) runPRCommentSession(sessionID string, event *gitprovider.Webhoo
 		log.Printf("Failed to post ack comment: %v", err)
 	}
 
-	var repoContext string
-	e.emitEvent(sess.ID, "status", "Indexing repository...")
-	rc, indexErr := e.git.IndexRepo(ctx, sess.Repo)
-	if indexErr != nil {
-		log.Printf("Repo indexing failed (proceeding without context): %v", indexErr)
-	} else {
-		repoContext = ghImpl.FormatRepoContext(rc)
-	}
-
-	prompt := sess.Prompt
-	if e.plan != nil {
-		e.emitEvent(sess.ID, "status", "Planning changes for PR comment...")
-		pCtx := &pipeline.Context{Ctx: ctx, Repo: sess.Repo, Prompt: prompt, RepoCtx: repoContext}
-		if err := e.plan.Execute(pCtx); err != nil {
-			log.Printf("Planning failed for PR comment session: %v", err)
-		} else {
-			prompt = pipeline.EnrichPrompt(sess.Prompt, pCtx.Plan)
-		}
-	}
-
-	result, err := e.runSandboxRound(ctx, sess, prompt)
+	result, err := e.runSandboxRound(ctx, sess, sess.Prompt)
 	if err != nil {
 		e.failSession(sess, fmt.Sprintf("PR comment session failed: %v", err))
 		replyMsg := fmt.Sprintf("❌ TeleCoder failed to address this comment (session `%s`): %v", sess.ID, err)
@@ -1376,17 +1169,28 @@ func (e *Engine) emitEvent(sessionID, eventType, data string) {
 }
 
 func (e *Engine) dispatchLogLine(sessionID, line string) {
-	switch {
-	case strings.HasPrefix(line, "###TELECODER_STATUS### "):
-		e.emitEvent(sessionID, "status", strings.TrimPrefix(line, "###TELECODER_STATUS### "))
-	case strings.HasPrefix(line, "###TELECODER_ERROR### "):
-		e.emitEvent(sessionID, "error", strings.TrimPrefix(line, "###TELECODER_ERROR### "))
-	case strings.HasPrefix(line, "###TELECODER_DONE### "):
-		branch := strings.TrimPrefix(line, "###TELECODER_DONE### ")
-		e.emitEvent(sessionID, "status", fmt.Sprintf("Branch pushed: %s", branch))
-	case strings.HasPrefix(line, "###TELECODER_RESULT### "):
-		e.emitEvent(sessionID, "result", strings.TrimPrefix(line, "###TELECODER_RESULT### "))
-	default:
+	a := agent.Default()
+	ev := a.ParseEvent(line)
+	if ev != nil {
+		ev.SessionID = sessionID
+		e.emitParsedEvent(sessionID, ev)
+	} else {
 		e.emitEvent(sessionID, "output", line)
 	}
+}
+
+// emitParsedEvent stores and publishes an event that was already parsed by a CodingAgent.
+func (e *Engine) emitParsedEvent(sessionID string, ev *model.Event) {
+	ev.SessionID = sessionID
+	if ev.CreatedAt.IsZero() {
+		ev.CreatedAt = time.Now().UTC()
+	}
+	if ev.Type == "done" {
+		e.emitEvent(sessionID, "status", fmt.Sprintf("Branch pushed: %s", ev.Data))
+		return
+	}
+	if err := e.store.AddEvent(ev); err != nil {
+		log.Printf("Error storing event: %v", err)
+	}
+	e.bus.Publish(sessionID, ev)
 }

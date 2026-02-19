@@ -34,7 +34,6 @@ import (
 	"github.com/jxucoder/TeleCoder/internal/engine"
 	"github.com/jxucoder/TeleCoder/internal/httpapi"
 	"github.com/jxucoder/TeleCoder/pkg/model"
-	"github.com/jxucoder/TeleCoder/pkg/pipeline"
 	"github.com/jxucoder/TeleCoder/pkg/sandbox"
 	sqliteStore "github.com/jxucoder/TeleCoder/pkg/store/sqlite"
 )
@@ -152,12 +151,7 @@ func (g *fakeGitProvider) GetDefaultBranch(_ context.Context, _ string) (string,
 	return "main", nil
 }
 
-func (g *fakeGitProvider) IndexRepo(_ context.Context, _ string) (*gitprovider.RepoContext, error) {
-	return &gitprovider.RepoContext{
-		Tree:      "src/main.go\nsrc/handler.go\ngo.mod\nREADME.md",
-		Languages: map[string]int{"Go": 95, "Markdown": 5},
-	}, nil
-}
+
 
 func (g *fakeGitProvider) ReplyToPRComment(_ context.Context, _ string, _ int, _ string) error {
 	return nil
@@ -167,24 +161,6 @@ func (g *fakeGitProvider) ReplyToPRComment(_ context.Context, _ string, _ int, _
 // Fake LLM
 // ---------------------------------------------------------------------------
 
-type fakeLLM struct{}
-
-func (f *fakeLLM) Complete(_ context.Context, system, _ string) (string, error) {
-	lower := strings.ToLower(system)
-	if strings.Contains(lower, "decompos") || strings.Contains(lower, "sub-task") {
-		return `[{"title":"Implement the feature","description":"Make the requested changes"}]`, nil
-	}
-	if strings.Contains(lower, "plan") {
-		return "1. Modify src/main.go\n2. Add tests", nil
-	}
-	if strings.Contains(lower, "review") {
-		return `{"approved": true, "feedback": "Looks good."}`, nil
-	}
-	if strings.Contains(lower, "verify") || strings.Contains(lower, "test output") {
-		return `{"passed": true, "feedback": "All tests pass."}`, nil
-	}
-	return "ok", nil
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -219,7 +195,6 @@ func setupE2E(t *testing.T, cfg engine.Config) *e2eHarness {
 	bus := eventbus.NewInMemoryBus()
 	sb := &simSandbox{}
 	git := &fakeGitProvider{}
-	llm := &fakeLLM{}
 
 	if cfg.DockerImage == "" {
 		cfg.DockerImage = "telecoder-sandbox"
@@ -236,10 +211,6 @@ func setupE2E(t *testing.T, cfg engine.Config) *e2eHarness {
 
 	eng := engine.New(
 		cfg, st, bus, sb, git,
-		pipeline.NewPlanStage(llm, ""),
-		pipeline.NewReviewStage(llm, ""),
-		pipeline.NewDecomposeStage(llm, ""),
-		pipeline.NewVerifyStage(llm, ""),
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -550,136 +521,7 @@ func (s *multiStepSimSandbox) getStarts() []sandbox.StartOptions {
 	return cp
 }
 
-// Multi-step fake LLM: returns 3 sub-tasks for decompose.
-type multiStepFakeLLM struct{}
 
-func (f *multiStepFakeLLM) Complete(_ context.Context, system, _ string) (string, error) {
-	lower := strings.ToLower(system)
-	if strings.Contains(lower, "decompos") || strings.Contains(lower, "sub-task") {
-		return `[
-			{"title":"Add data model","description":"Create the data model and database schema"},
-			{"title":"Add API endpoints","description":"Implement REST API endpoints"},
-			{"title":"Add tests","description":"Add comprehensive unit tests"}
-		]`, nil
-	}
-	if strings.Contains(lower, "plan") {
-		return "1. Create files\n2. Test", nil
-	}
-	if strings.Contains(lower, "review") {
-		return "APPROVED: good", nil
-	}
-	if strings.Contains(lower, "verify") || strings.Contains(lower, "test output") {
-		return "PASSED: all pass", nil
-	}
-	return "ok", nil
-}
-
-// TestE2E_MultiStepTaskWithCheckpoints verifies the full multi-step flow:
-// POST session → decompose into 3 steps → persistent container → checkpoints → PR.
-func TestE2E_MultiStepTaskWithCheckpoints(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "e2e_multi.db")
-	st, err := sqliteStore.New(dbPath)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	bus := eventbus.NewInMemoryBus()
-	sb := &multiStepSimSandbox{}
-	git := &fakeGitProvider{}
-	llm := &multiStepFakeLLM{}
-
-	cfg := engine.Config{
-		DockerImage:     "telecoder-sandbox",
-		MaxRevisions:    1,
-		MaxSubTasks:     10,
-		ChatIdleTimeout: 30 * time.Minute,
-		ChatMaxMessages: 50,
-	}
-
-	eng := engine.New(
-		cfg, st, bus, sb, git,
-		pipeline.NewPlanStage(llm, ""),
-		pipeline.NewReviewStage(llm, ""),
-		pipeline.NewDecomposeStage(llm, ""),
-		pipeline.NewVerifyStage(llm, ""),
-	)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	eng.Start(ctx)
-	t.Cleanup(func() {
-		cancel()
-		eng.Stop()
-	})
-
-	handler := httpapi.New(eng)
-	h := &e2eHarness{handler: handler, sb: nil, git: git, eng: eng}
-
-	// 1. Create session.
-	w := h.do("POST", "/api/sessions", `{"repo":"myorg/myapp","prompt":"add user auth with login, signup, and password reset"}`)
-	if w.Code != http.StatusCreated {
-		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
-	}
-
-	var created struct {
-		ID   string `json:"id"`
-		Mode string `json:"mode"`
-	}
-	json.NewDecoder(w.Body).Decode(&created)
-	t.Logf("Created multi-step session %s", created.ID)
-
-	// 2. Wait for completion.
-	sess := h.waitForSession(t, created.ID, 15*time.Second)
-	if sess.Status != model.StatusComplete {
-		t.Fatalf("expected 'complete', got %q (error: %s)", sess.Status, sess.Error)
-	}
-
-	// 3. Verify PR was created.
-	if sess.PRUrl == "" || sess.PRNumber == 0 {
-		t.Fatal("expected PR URL and number to be set")
-	}
-	git.mu.Lock()
-	if !git.prCreated {
-		t.Fatal("expected git CreatePR to be called")
-	}
-	git.mu.Unlock()
-
-	// 4. Verify persistent container was used (Persistent=true in starts).
-	starts := sb.getStarts()
-	persistentFound := false
-	for _, s := range starts {
-		if s.Persistent {
-			persistentFound = true
-			break
-		}
-	}
-	if !persistentFound {
-		t.Fatal("expected at least one persistent sandbox Start for multi-step task")
-	}
-
-	// 5. Verify events include step and progress markers.
-	events, err := eng.Store().GetEvents(created.ID, 0)
-	if err != nil {
-		t.Fatalf("GetEvents: %v", err)
-	}
-	stepCount := 0
-	progressCount := 0
-	for _, ev := range events {
-		if ev.Type == "step" {
-			stepCount++
-		}
-		if ev.Type == "progress" {
-			progressCount++
-		}
-	}
-	if stepCount < 3 {
-		t.Fatalf("expected at least 3 step events (one per sub-task), got %d", stepCount)
-	}
-	if progressCount < 3 {
-		t.Fatalf("expected at least 3 progress events, got %d", progressCount)
-	}
-	t.Logf("Multi-step session completed: PR=%s, steps=%d, progress events=%d", sess.PRUrl, stepCount, progressCount)
-}
 
 // Compile-time check that top-level types are referenced.
 var _ = telecoder.Config{}

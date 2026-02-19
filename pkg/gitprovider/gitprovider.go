@@ -22,14 +22,6 @@ type PRComment struct {
 	InReplyTo int64
 }
 
-// RepoContext holds the structural summary of a repository.
-type RepoContext struct {
-	Description string
-	Tree        string
-	Languages   map[string]int
-	KeyFiles    map[string]string
-}
-
 // WebhookEvent represents a parsed webhook event relevant to PR comments.
 type WebhookEvent struct {
 	Action      string
@@ -44,6 +36,5 @@ type WebhookEvent struct {
 type Provider interface {
 	CreatePR(ctx context.Context, opts PROptions) (url string, number int, err error)
 	GetDefaultBranch(ctx context.Context, repo string) (string, error)
-	IndexRepo(ctx context.Context, repo string) (*RepoContext, error)
 	ReplyToPRComment(ctx context.Context, repo string, prNumber int, body string) error
 }

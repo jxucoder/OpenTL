@@ -11,19 +11,11 @@ import (
 	"github.com/jxucoder/TeleCoder/pkg/eventbus"
 	"github.com/jxucoder/TeleCoder/pkg/gitprovider"
 	"github.com/jxucoder/TeleCoder/pkg/model"
-	"github.com/jxucoder/TeleCoder/pkg/pipeline"
 	"github.com/jxucoder/TeleCoder/pkg/sandbox"
 	sqliteStore "github.com/jxucoder/TeleCoder/pkg/store/sqlite"
 )
 
 // --- stubs ---
-
-type stubLLM struct{}
-
-func (s *stubLLM) Complete(_ context.Context, _, _ string) (string, error) {
-	return `[{"title":"Complete task","description":"do the thing"}]`, nil
-}
-
 type stubSandbox struct {
 	startCalls int
 }
@@ -59,9 +51,6 @@ func (s *stubGitProvider) CreatePR(_ context.Context, _ gitprovider.PROptions) (
 func (s *stubGitProvider) GetDefaultBranch(_ context.Context, _ string) (string, error) {
 	return "main", nil
 }
-func (s *stubGitProvider) IndexRepo(_ context.Context, _ string) (*gitprovider.RepoContext, error) {
-	return &gitprovider.RepoContext{Tree: "README.md"}, nil
-}
 func (s *stubGitProvider) ReplyToPRComment(_ context.Context, _ string, _ int, _ string) error {
 	return nil
 }
@@ -80,11 +69,6 @@ func testEngine(t *testing.T) (*Engine, *stubSandbox, *stubGitProvider) {
 	bus := eventbus.NewInMemoryBus()
 	sb := &stubSandbox{}
 	git := &stubGitProvider{}
-	llmClient := &stubLLM{}
-	plan := pipeline.NewPlanStage(llmClient, "")
-	review := pipeline.NewReviewStage(llmClient, "")
-	decompose := pipeline.NewDecomposeStage(llmClient, "")
-	verify := pipeline.NewVerifyStage(llmClient, "")
 
 	eng := New(
 		Config{
@@ -93,7 +77,7 @@ func testEngine(t *testing.T) (*Engine, *stubSandbox, *stubGitProvider) {
 			ChatIdleTimeout: 30 * time.Minute,
 			ChatMaxMessages: 50,
 		},
-		st, bus, sb, git, plan, review, decompose, verify,
+		st, bus, sb, git,
 	)
 	return eng, sb, git
 }
@@ -348,7 +332,6 @@ func TestRunSandboxRoundWithAgent_PassesAgentEnv(t *testing.T) {
 	bus := eventbus.NewInMemoryBus()
 	capSb := &capturingStubSandbox{}
 	git := &stubGitProvider{}
-	llmClient := &stubLLM{}
 
 	eng := New(
 		Config{
@@ -360,10 +343,6 @@ func TestRunSandboxRoundWithAgent_PassesAgentEnv(t *testing.T) {
 			CodingAgent:     "claude-code",
 		},
 		st, bus, capSb, git,
-		pipeline.NewPlanStage(llmClient, ""),
-		pipeline.NewReviewStage(llmClient, ""),
-		pipeline.NewDecomposeStage(llmClient, ""),
-		pipeline.NewVerifyStage(llmClient, ""),
 	)
 
 	sess := &model.Session{
@@ -469,7 +448,6 @@ func TestRunSession_TextResult_NoPR(t *testing.T) {
 
 	bus := eventbus.NewInMemoryBus()
 	git := &stubGitProvider{}
-	llmClient := &stubLLM{}
 
 	sb := &scriptedSandbox{
 		logLines: []string{
@@ -486,10 +464,6 @@ func TestRunSession_TextResult_NoPR(t *testing.T) {
 			ChatMaxMessages: 50,
 		},
 		st, bus, sb, git,
-		pipeline.NewPlanStage(llmClient, ""),
-		pipeline.NewReviewStage(llmClient, ""),
-		pipeline.NewDecomposeStage(llmClient, ""),
-		pipeline.NewVerifyStage(llmClient, ""),
 	)
 
 	sess, err := eng.CreateAndRunSession("owner/repo", "what language is this?")
@@ -533,7 +507,6 @@ func TestRunSession_PRResult_BackwardCompat(t *testing.T) {
 
 	bus := eventbus.NewInMemoryBus()
 	git := &stubGitProvider{}
-	llmClient := &stubLLM{}
 
 	sb := &scriptedSandbox{
 		logLines: []string{
@@ -550,10 +523,6 @@ func TestRunSession_PRResult_BackwardCompat(t *testing.T) {
 			ChatMaxMessages: 50,
 		},
 		st, bus, sb, git,
-		pipeline.NewPlanStage(llmClient, ""),
-		pipeline.NewReviewStage(llmClient, ""),
-		pipeline.NewDecomposeStage(llmClient, ""),
-		pipeline.NewVerifyStage(llmClient, ""),
 	)
 
 	sess, err := eng.CreateAndRunSession("owner/repo", "fix the bug")
@@ -702,15 +671,10 @@ func TestCheckpointSubTask(t *testing.T) {
 	sb := newMultiStepSandbox()
 	sb.hasChanges = true // Simulate uncommitted changes.
 	git := &stubGitProvider{}
-	llmClient := &stubLLM{}
 
 	eng := New(
 		Config{DockerImage: "test-image", MaxRevisions: 1, ChatIdleTimeout: 30 * time.Minute, ChatMaxMessages: 50},
 		st, bus, sb, git,
-		pipeline.NewPlanStage(llmClient, ""),
-		pipeline.NewReviewStage(llmClient, ""),
-		pipeline.NewDecomposeStage(llmClient, ""),
-		pipeline.NewVerifyStage(llmClient, ""),
 	)
 
 	ctx := context.Background()
@@ -754,15 +718,10 @@ func TestCheckpointSubTask_NoChanges(t *testing.T) {
 	sb := newMultiStepSandbox()
 	sb.hasChanges = false // No uncommitted changes.
 	git := &stubGitProvider{}
-	llmClient := &stubLLM{}
 
 	eng := New(
 		Config{DockerImage: "test-image", MaxRevisions: 1, ChatIdleTimeout: 30 * time.Minute, ChatMaxMessages: 50},
 		st, bus, sb, git,
-		pipeline.NewPlanStage(llmClient, ""),
-		pipeline.NewReviewStage(llmClient, ""),
-		pipeline.NewDecomposeStage(llmClient, ""),
-		pipeline.NewVerifyStage(llmClient, ""),
 	)
 
 	ctx := context.Background()
@@ -795,15 +754,10 @@ func TestHasUncommittedChanges(t *testing.T) {
 	bus := eventbus.NewInMemoryBus()
 	sb := newMultiStepSandbox()
 	git := &stubGitProvider{}
-	llmClient := &stubLLM{}
 
 	eng := New(
 		Config{DockerImage: "test-image", MaxRevisions: 1, ChatIdleTimeout: 30 * time.Minute, ChatMaxMessages: 50},
 		st, bus, sb, git,
-		pipeline.NewPlanStage(llmClient, ""),
-		pipeline.NewReviewStage(llmClient, ""),
-		pipeline.NewDecomposeStage(llmClient, ""),
-		pipeline.NewVerifyStage(llmClient, ""),
 	)
 
 	ctx := context.Background()
@@ -830,15 +784,10 @@ func TestRollbackToCheckpoint(t *testing.T) {
 	bus := eventbus.NewInMemoryBus()
 	sb := newMultiStepSandbox()
 	git := &stubGitProvider{}
-	llmClient := &stubLLM{}
 
 	eng := New(
 		Config{DockerImage: "test-image", MaxRevisions: 1, ChatIdleTimeout: 30 * time.Minute, ChatMaxMessages: 50},
 		st, bus, sb, git,
-		pipeline.NewPlanStage(llmClient, ""),
-		pipeline.NewReviewStage(llmClient, ""),
-		pipeline.NewDecomposeStage(llmClient, ""),
-		pipeline.NewVerifyStage(llmClient, ""),
 	)
 
 	ctx := context.Background()
@@ -871,18 +820,13 @@ func TestWriteProgressFile(t *testing.T) {
 	bus := eventbus.NewInMemoryBus()
 	sb := newMultiStepSandbox()
 	git := &stubGitProvider{}
-	llmClient := &stubLLM{}
 
 	eng := New(
 		Config{DockerImage: "test-image", MaxRevisions: 1, ChatIdleTimeout: 30 * time.Minute, ChatMaxMessages: 50},
 		st, bus, sb, git,
-		pipeline.NewPlanStage(llmClient, ""),
-		pipeline.NewReviewStage(llmClient, ""),
-		pipeline.NewDecomposeStage(llmClient, ""),
-		pipeline.NewVerifyStage(llmClient, ""),
 	)
 
-	statuses := []pipeline.SubTaskStatus{
+	statuses := []model.SubTaskStatus{
 		{Title: "Step 1", Description: "Do thing", Status: "completed", CommitHash: "abc"},
 	}
 
@@ -905,98 +849,6 @@ func TestWriteProgressFile(t *testing.T) {
 	}
 }
 
-// TestRunSessionMultiStep_PersistentContainer verifies that the multi-step path
-// starts a persistent container and runs setup.
-func TestRunSessionMultiStep_PersistentContainer(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	st, err := sqliteStore.New(dbPath)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
-
-	bus := eventbus.NewInMemoryBus()
-	sb := newMultiStepSandbox()
-	sb.hasChanges = true // Simulate code changes.
-	git := &stubGitProvider{}
-
-	// Use an LLM that returns 2 sub-tasks.
-	multiLLM := &multiStepLLM{}
-
-	eng := New(
-		Config{
-			DockerImage:     "test-image",
-			MaxRevisions:    1,
-			MaxSubTasks:     5,
-			ChatIdleTimeout: 30 * time.Minute,
-			ChatMaxMessages: 50,
-		},
-		st, bus, sb, git,
-		pipeline.NewPlanStage(multiLLM, ""),
-		pipeline.NewReviewStage(multiLLM, ""),
-		pipeline.NewDecomposeStage(multiLLM, ""),
-		pipeline.NewVerifyStage(multiLLM, ""),
-	)
-
-	sess, err := eng.CreateAndRunSession("owner/repo", "complex feature")
-	if err != nil {
-		t.Fatalf("CreateAndRunSession: %v", err)
-	}
-
-	// Wait for the session to complete.
-	time.Sleep(1 * time.Second)
-
-	got, _ := eng.Store().GetSession(sess.ID)
-	if got.Status != model.StatusComplete {
-		t.Fatalf("expected 'complete', got %q (error: %s)", got.Status, got.Error)
-	}
-
-	// Verify persistent container was started.
-	if sb.startCalls < 1 {
-		t.Fatal("expected at least one sandbox Start call")
-	}
-
-	// Verify PR was created (since hasChanges=true).
-	if git.createPRCalls < 1 {
-		t.Fatal("expected PR to be created for multi-step task with changes")
-	}
-
-	// Verify progress events were emitted.
-	events, _ := eng.Store().GetEvents(sess.ID, 0)
-	progressCount := 0
-	stepCount := 0
-	for _, ev := range events {
-		if ev.Type == "progress" {
-			progressCount++
-		}
-		if ev.Type == "step" {
-			stepCount++
-		}
-	}
-	if stepCount < 2 {
-		t.Fatalf("expected at least 2 step events, got %d", stepCount)
-	}
-}
-
-// multiStepLLM returns 2 sub-tasks from decompose and simple plans/reviews.
-type multiStepLLM struct{}
-
-func (m *multiStepLLM) Complete(_ context.Context, system, _ string) (string, error) {
-	lower := strings.ToLower(system)
-	if strings.Contains(lower, "decompos") || strings.Contains(lower, "sub-task") {
-		return `[{"title":"Add feature","description":"Implement the core feature"},{"title":"Add tests","description":"Add unit tests for the feature"}]`, nil
-	}
-	if strings.Contains(lower, "plan") {
-		return "1. Modify files\n2. Add tests", nil
-	}
-	if strings.Contains(lower, "review") {
-		return "APPROVED: looks good", nil
-	}
-	if strings.Contains(lower, "verify") || strings.Contains(lower, "test output") {
-		return "PASSED: all tests pass", nil
-	}
-	return "ok", nil
-}
 
 func TestDispatchLogLine_ResultMarker(t *testing.T) {
 	eng, _, _ := testEngine(t)
