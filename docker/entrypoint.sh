@@ -1,16 +1,20 @@
 #!/bin/bash
-# TeleCoder Sandbox Entrypoint
+# TeleCoder Sandbox Entrypoint (v2)
+#
+# Engine-aware entrypoint that selects the coding agent based on
+# TELECODER_CODING_AGENT. Supported: pi, opencode, claude-code, codex, auto.
 #
 # This script runs inside the Docker sandbox container. It:
 #   1. Clones the repository
-#   2. Runs a coding agent (OpenCode or Codex CLI)
-#   3. Commits and pushes changes
+#   2. Runs the selected coding agent
+#   3. Commits and pushes changes (if any)
 #   4. Signals completion back to the server
 #
 # Communication protocol:
 #   Lines prefixed with ###TELECODER_STATUS### are status updates
 #   Lines prefixed with ###TELECODER_ERROR###  are error messages
-#   Lines prefixed with ###TELECODER_DONE###   signal completion
+#   Lines prefixed with ###TELECODER_DONE###   signal completion (branch name)
+#   Lines prefixed with ###TELECODER_RESULT### signal result type (JSON)
 #   All other lines are agent output
 
 set -euo pipefail
@@ -34,11 +38,9 @@ CLONE_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/${TELECODER_REPO}.g
 git clone --depth=1 "${CLONE_URL}" /workspace/repo 2>&1
 cd /workspace/repo
 
-# Configure git identity.
 git config user.name "TeleCoder"
 git config user.email "telecoder@users.noreply.github.com"
 
-# Create the working branch.
 git checkout -b "${TELECODER_BRANCH}"
 
 emit_status "Repository cloned successfully"
@@ -65,6 +67,23 @@ fi
 emit_status "Dependencies installed"
 
 # --- Agent runner functions ---
+
+run_pi() {
+    emit_status "Running Pi..."
+    local PI_ARGS="--mode json"
+    if [ -n "${TELECODER_CODING_AGENT_MODEL:-}" ]; then
+        PI_ARGS="${PI_ARGS} -m ${TELECODER_CODING_AGENT_MODEL}"
+        emit_status "Running Pi (${TELECODER_CODING_AGENT_MODEL})..."
+    fi
+
+    pi -p "${TELECODER_PROMPT}" ${PI_ARGS} 2>&1 || {
+        EXIT_CODE=$?
+        if [ $EXIT_CODE -ne 0 ]; then
+            emit_error "Pi agent exited with code ${EXIT_CODE}"
+            exit $EXIT_CODE
+        fi
+    }
+}
 
 run_opencode() {
     MODEL_ARGS=""
@@ -123,13 +142,16 @@ run_codex() {
 
 # --- Select and run coding agent ---
 # Agent selection:
-#   TELECODER_CODING_AGENT explicitly selects the agent ("opencode", "claude-code", "codex").
+#   TELECODER_CODING_AGENT explicitly selects: "pi", "opencode", "claude-code", "codex".
 #   "auto" (default) falls back to API-key-based detection:
-#     1. ANTHROPIC_API_KEY set → OpenCode
+#     1. ANTHROPIC_API_KEY set → Pi (default, model-agnostic)
 #     2. OPENAI_API_KEY set   → Codex CLI
 #     3. Neither              → error
 
 case "${TELECODER_CODING_AGENT:-auto}" in
+    pi)
+        run_pi
+        ;;
     opencode)
         run_opencode
         ;;
@@ -141,7 +163,7 @@ case "${TELECODER_CODING_AGENT:-auto}" in
         ;;
     auto)
         if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-            run_opencode
+            run_pi
         elif [ -n "${OPENAI_API_KEY:-}" ]; then
             run_codex
         else
@@ -150,7 +172,7 @@ case "${TELECODER_CODING_AGENT:-auto}" in
         fi
         ;;
     *)
-        emit_error "Unknown agent: ${TELECODER_CODING_AGENT}. Supported: opencode, claude-code, codex, auto."
+        emit_error "Unknown agent: ${TELECODER_CODING_AGENT}. Supported: pi, opencode, claude-code, codex, auto."
         exit 1
         ;;
 esac
@@ -163,7 +185,6 @@ emit_status "Checking for code changes..."
 git add -A
 
 if git diff --cached --quiet; then
-    # No code changes — the agent's stdout is the answer.
     emit_status "No code changes detected, returning text result"
     emit_result '{"type":"text"}'
     exit 0
@@ -172,9 +193,7 @@ fi
 # --- Commit changes ---
 emit_status "Committing changes..."
 
-# Create a meaningful commit message.
 COMMIT_MSG="telecoder: ${TELECODER_PROMPT}"
-# Truncate to 72 chars for git subject line.
 if [ ${#COMMIT_MSG} -gt 72 ]; then
     COMMIT_MSG="${COMMIT_MSG:0:69}..."
 fi

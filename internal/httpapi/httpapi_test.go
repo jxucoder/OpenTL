@@ -12,12 +12,9 @@ import (
 	"github.com/jxucoder/TeleCoder/internal/engine"
 	"github.com/jxucoder/TeleCoder/pkg/eventbus"
 	"github.com/jxucoder/TeleCoder/pkg/model"
-	"github.com/jxucoder/TeleCoder/pkg/pipeline"
 	sqliteStore "github.com/jxucoder/TeleCoder/pkg/store/sqlite"
 )
 
-// testEngine builds an Engine wired to a real SQLite store, in-memory bus,
-// and a no-op sandbox/git provider. Good enough for HTTP handler tests.
 func testEngine(t *testing.T) *engine.Engine {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
@@ -30,11 +27,6 @@ func testEngine(t *testing.T) *engine.Engine {
 	bus := eventbus.NewInMemoryBus()
 	sb := &stubSandbox{}
 	git := &stubGitProvider{}
-	llmClient := &stubLLM{}
-	plan := pipeline.NewPlanStage(llmClient, "")
-	review := pipeline.NewReviewStage(llmClient, "")
-	decompose := pipeline.NewDecomposeStage(llmClient, "")
-	verify := pipeline.NewVerifyStage(llmClient, "")
 
 	eng := engine.New(
 		engine.Config{
@@ -43,7 +35,7 @@ func testEngine(t *testing.T) *engine.Engine {
 			ChatIdleTimeout: 30 * time.Minute,
 			ChatMaxMessages: 50,
 		},
-		st, bus, sb, git, plan, review, decompose, verify,
+		st, bus, sb, git,
 	)
 	return eng
 }

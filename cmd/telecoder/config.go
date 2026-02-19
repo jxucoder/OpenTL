@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -25,11 +26,16 @@ var allConfigKeys = []configKey{
 	{"GITHUB_TOKEN", "GitHub personal access token (repo scope)", true, true, ""},
 	{"ANTHROPIC_API_KEY", "Anthropic API key", false, true, "sk-ant-"},
 	{"OPENAI_API_KEY", "OpenAI API key", false, true, "sk-"},
+	{"TELECODER_CODING_AGENT", "Coding agent (pi, opencode, claude-code, codex, auto)", false, false, ""},
 	{"TELEGRAM_BOT_TOKEN", "Telegram bot token (from @BotFather)", false, true, ""},
 	{"TELEGRAM_DEFAULT_REPO", "Default repo for Telegram (owner/repo)", false, false, ""},
 	{"SLACK_BOT_TOKEN", "Slack Bot User OAuth Token (xoxb-...)", false, true, "xoxb-"},
 	{"SLACK_APP_TOKEN", "Slack App-Level Token (xapp-...)", false, true, "xapp-"},
 	{"SLACK_DEFAULT_REPO", "Default repo for Slack (owner/repo)", false, false, ""},
+}
+
+var validAgents = map[string]bool{
+	"pi": true, "opencode": true, "claude-code": true, "codex": true, "auto": true,
 }
 
 // ---------------------------------------------------------------------------
@@ -50,11 +56,20 @@ by environment variables.
   telecoder config path               Print config file path`,
 }
 
+var (
+	setupNonInteractive bool
+	setupGitHubToken    string
+	setupEngine         string
+)
+
 var configSetupCmd = &cobra.Command{
 	Use:   "setup",
 	Short: "Interactive setup wizard",
 	Long: `Guided setup that walks you through configuring TeleCoder step by step.
-It groups settings into logical sections and validates your input.`,
+It groups settings into logical sections and validates your input.
+
+Non-interactive mode for CI/scripting:
+  telecoder config setup --non-interactive --github-token=ghp_xxx --engine=pi`,
 	RunE: runConfigSetup,
 }
 
@@ -84,6 +99,10 @@ var configPathCmd = &cobra.Command{
 }
 
 func init() {
+	configSetupCmd.Flags().BoolVar(&setupNonInteractive, "non-interactive", false, "Run without prompts (requires --github-token)")
+	configSetupCmd.Flags().StringVar(&setupGitHubToken, "github-token", "", "GitHub token (non-interactive mode)")
+	configSetupCmd.Flags().StringVar(&setupEngine, "engine", "auto", "Coding agent: pi, opencode, claude-code, codex, auto")
+
 	configCmd.AddCommand(configSetupCmd)
 	configCmd.AddCommand(configSetCmd)
 	configCmd.AddCommand(configShowCmd)
@@ -289,9 +308,12 @@ func runConfigSetup(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("reading config: %w", err)
 	}
 
+	if setupNonInteractive {
+		return runNonInteractiveSetup(fileValues)
+	}
+
 	w := newWizard(fileValues)
 
-	// ── Welcome ──────────────────────────────────────────────────────────
 	fmt.Println()
 	fmt.Println("  \033[1mTeleCoder Setup\033[0m")
 	fmt.Println("  ───────────────")
@@ -299,8 +321,8 @@ func runConfigSetup(cmd *cobra.Command, args []string) error {
 	fmt.Println("  Press Enter at any prompt to keep the current value.")
 	fmt.Println()
 
-	// ── Step 1: GitHub Token (required) ──────────────────────────────────
-	fmt.Println("  \033[1mStep 1 of 4 — GitHub Token (required)\033[0m")
+	// ── Step 1: GitHub Token ─────────────────────────────────────────────
+	fmt.Println("  \033[1mStep 1 of 6 — GitHub Token (required)\033[0m")
 	fmt.Println("  TeleCoder needs a GitHub personal access token to clone repos and create PRs.")
 	fmt.Println("  Create one at: \033[4mhttps://github.com/settings/tokens\033[0m")
 	fmt.Println("  Required scopes: \033[1mrepo\033[0m")
@@ -318,8 +340,8 @@ func runConfigSetup(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
-	// ── Step 2: LLM API Key (at least one required) ──────────────────────
-	fmt.Println("  \033[1mStep 2 of 4 — LLM API Key (at least one required)\033[0m")
+	// ── Step 2: LLM API Key ─────────────────────────────────────────────
+	fmt.Println("  \033[1mStep 2 of 6 — LLM API Key (at least one required)\033[0m")
 	fmt.Println("  The coding agents need an LLM API key to work.")
 	fmt.Println("  You need at least one of Anthropic (Claude) or OpenAI.")
 	fmt.Println()
@@ -342,18 +364,50 @@ func runConfigSetup(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
-	// ── Step 3: Telegram (optional) ──────────────────────────────────────
-	fmt.Println("  \033[1mStep 3 of 4 — Telegram Bot (optional)\033[0m")
+	// ── Step 3: Coding Agent ─────────────────────────────────────────────
+	fmt.Println("  \033[1mStep 3 of 6 — Coding Agent\033[0m")
+	fmt.Println("  Choose which coding agent runs inside the sandbox.")
+	fmt.Println("  Options: pi (default), opencode, claude-code, codex, auto")
+	fmt.Println()
+
+	current := effectiveValue("TELECODER_CODING_AGENT", w.fileValues)
+	if current == "" {
+		current = "auto"
+	}
+	fmt.Printf("  Current: %s\n", current)
+	for {
+		fmt.Print("  Agent (Enter to keep): ")
+		input, err := w.reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		input = strings.TrimSpace(input)
+		if input == "" {
+			break
+		}
+		if !validAgents[input] {
+			fmt.Printf("  \033[33m!\033[0m  Unknown agent %q. Choose: pi, opencode, claude-code, codex, auto\n", input)
+			continue
+		}
+		w.fileValues["TELECODER_CODING_AGENT"] = input
+		w.changed++
+		fmt.Printf("  \033[32m✓ saved\033[0m\n")
+		break
+	}
+	fmt.Println()
+
+	// ── Step 4: Telegram ─────────────────────────────────────────────────
+	fmt.Println("  \033[1mStep 4 of 6 — Telegram Bot (optional)\033[0m")
 	fmt.Println("  Send tasks to TeleCoder from your phone via Telegram.")
 	fmt.Println("  Get a bot token from @BotFather on Telegram (takes 30 seconds).")
 	fmt.Println()
 
-	setupTelegram, err := w.askYesNo("Set up Telegram?", false)
+	doTelegram, err := w.askYesNo("Set up Telegram?", false)
 	if err != nil {
 		return err
 	}
 
-	if setupTelegram {
+	if doTelegram {
 		fmt.Println()
 		tgToken := findKey("TELEGRAM_BOT_TOKEN")
 		if _, err := w.askValue(tgToken); err != nil {
@@ -370,19 +424,19 @@ func runConfigSetup(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
-	// ── Step 4: Slack (optional) ─────────────────────────────────────────
-	fmt.Println("  \033[1mStep 4 of 4 — Slack Bot (optional)\033[0m")
+	// ── Step 5: Slack ────────────────────────────────────────────────────
+	fmt.Println("  \033[1mStep 5 of 6 — Slack Bot (optional)\033[0m")
 	fmt.Println("  Let your team send tasks via Slack.")
 	fmt.Println("  Requires a Slack app with Socket Mode enabled.")
 	fmt.Println("  See: docs/slack-setup.md")
 	fmt.Println()
 
-	setupSlack, err := w.askYesNo("Set up Slack?", false)
+	doSlack, err := w.askYesNo("Set up Slack?", false)
 	if err != nil {
 		return err
 	}
 
-	if setupSlack {
+	if doSlack {
 		fmt.Println()
 		slackBot := findKey("SLACK_BOT_TOKEN")
 		if _, err := w.askValue(slackBot); err != nil {
@@ -404,17 +458,27 @@ func runConfigSetup(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Println()
 
+	// ── Step 6: Docker ───────────────────────────────────────────────────
+	fmt.Println("  \033[1mStep 6 of 6 — Docker Check\033[0m")
+	checkDocker()
+	fmt.Println()
+
 	// ── Save ─────────────────────────────────────────────────────────────
 	if err := saveConfigFile(w.fileValues); err != nil {
 		return err
 	}
 
 	// ── Summary ──────────────────────────────────────────────────────────
+	agentName := effectiveValue("TELECODER_CODING_AGENT", w.fileValues)
+	if agentName == "" {
+		agentName = "auto"
+	}
 	fmt.Println("  \033[1mConfiguration Summary\033[0m")
 	fmt.Println("  ────────────────────")
 	printSummaryLine("GitHub", effectiveValue("GITHUB_TOKEN", w.fileValues) != "")
 	printSummaryLine("Anthropic", effectiveValue("ANTHROPIC_API_KEY", w.fileValues) != "")
 	printSummaryLine("OpenAI", effectiveValue("OPENAI_API_KEY", w.fileValues) != "")
+	fmt.Printf("  %-14s %s\n", "Agent", agentName)
 	printSummaryLine("Telegram", effectiveValue("TELEGRAM_BOT_TOKEN", w.fileValues) != "")
 	printSummaryLine("Slack", effectiveValue("SLACK_BOT_TOKEN", w.fileValues) != "" &&
 		effectiveValue("SLACK_APP_TOKEN", w.fileValues) != "")
@@ -422,21 +486,53 @@ func runConfigSetup(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Saved to %s\n", configFilePath())
 	fmt.Println()
 
-	// ── Next steps ───────────────────────────────────────────────────────
 	fmt.Println("  \033[1mNext Steps\033[0m")
 	fmt.Println("  ──────────")
-	fmt.Println("  1. Build the sandbox image (one-time):")
-	fmt.Println("       make sandbox-image")
-	fmt.Println()
-	fmt.Println("  2. Start the server:")
-	fmt.Println("       telecoderserve")
-	fmt.Println()
-	fmt.Println("  3. Run your first task:")
-	fmt.Println("       telecoderrun \"fix the typo in README\" --repo owner/repo")
+	fmt.Println("  1. Build the sandbox image:  make sandbox-image")
+	fmt.Println("  2. Start the server:         telecoder serve")
+	fmt.Println("  3. Run a task:               telecoder run \"fix the bug\" --repo owner/repo")
 	fmt.Println()
 
 	return nil
 }
+
+// runNonInteractiveSetup handles --non-interactive mode.
+func runNonInteractiveSetup(fileValues map[string]string) error {
+	if setupGitHubToken == "" {
+		return fmt.Errorf("--github-token is required in non-interactive mode")
+	}
+
+	fileValues["GITHUB_TOKEN"] = setupGitHubToken
+
+	if setupEngine != "" {
+		if !validAgents[setupEngine] {
+			return fmt.Errorf("unknown agent %q; valid: pi, opencode, claude-code, codex, auto", setupEngine)
+		}
+		fileValues["TELECODER_CODING_AGENT"] = setupEngine
+	}
+
+	if err := saveConfigFile(fileValues); err != nil {
+		return err
+	}
+
+	fmt.Printf("Config written to %s\n", configFilePath())
+	return nil
+}
+
+// checkDocker runs `docker info` and reports whether Docker is available.
+func checkDocker() {
+	cmd := exec.Command("docker", "info")
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Run(); err != nil {
+		fmt.Println("  \033[33m!\033[0m  Docker is not running or not installed.")
+		fmt.Println("     TeleCoder needs Docker for sandbox containers.")
+		fmt.Println("     Install: https://docs.docker.com/get-docker/")
+	} else {
+		fmt.Println("  \033[32m✓\033[0m Docker is running")
+	}
+}
+
 
 // findKey looks up a configKey by name.
 func findKey(name string) configKey {

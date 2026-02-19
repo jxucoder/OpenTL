@@ -1,14 +1,19 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 // Types matching the TeleCoder API.
 interface Session {
   id: string;
   repo: string;
   prompt: string;
-  status: "pending" | "running" | "complete" | "error";
+  mode: "task" | "chat";
+  status: "pending" | "running" | "complete" | "error" | "idle";
   branch: string;
+  agent?: string;
+  chain_id?: string;
+  chain_depth?: number;
   pr_url?: string;
   pr_number?: number;
+  result?: { type: string; content?: string; pr_url?: string; pr_number?: number };
   error?: string;
   created_at: string;
   updated_at: string;
@@ -97,6 +102,7 @@ function App() {
       running: "bg-blue-100 text-blue-800",
       complete: "bg-green-100 text-green-800",
       error: "bg-red-100 text-red-800",
+      idle: "bg-gray-100 text-gray-800",
     };
     return (
       <span
@@ -186,9 +192,19 @@ function App() {
                     <p className="text-sm text-gray-900 truncate">
                       {session.prompt}
                     </p>
-                    <p className="text-xs text-gray-500 mt-1">
-                      {session.repo}
-                    </p>
+                    <div className="flex items-center gap-2 mt-1">
+                      <p className="text-xs text-gray-500">{session.repo}</p>
+                      {session.agent && session.agent !== "auto" && (
+                        <span className="px-1.5 py-0.5 bg-purple-100 text-purple-700 rounded text-xs">
+                          {session.agent}
+                        </span>
+                      )}
+                      {session.chain_id && (
+                        <span className="px-1.5 py-0.5 bg-orange-100 text-orange-700 rounded text-xs" title={`Chain: ${session.chain_id} (depth ${session.chain_depth})`}>
+                          🔗 {session.chain_depth}
+                        </span>
+                      )}
+                    </div>
                     {session.pr_url && (
                       <a
                         href={session.pr_url}

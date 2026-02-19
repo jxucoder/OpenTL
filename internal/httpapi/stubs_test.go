@@ -7,13 +7,6 @@ import (
 	"github.com/jxucoder/TeleCoder/pkg/sandbox"
 )
 
-// stubLLM returns canned responses for pipeline stages.
-type stubLLM struct{}
-
-func (s *stubLLM) Complete(_ context.Context, _, _ string) (string, error) {
-	return `[{"title":"Complete task","description":"do the thing"}]`, nil
-}
-
 // stubSandbox is a no-op sandbox runtime for testing HTTP handlers.
 type stubSandbox struct{}
 
@@ -40,7 +33,7 @@ func (s *stubSandbox) IsRunning(_ context.Context, _ string) bool           { re
 // stubScanner returns no lines.
 type stubScanner struct{}
 
-func (s *stubScanner) Scan() bool  { return false }
+func (s *stubScanner) Scan() bool   { return false }
 func (s *stubScanner) Text() string { return "" }
 func (s *stubScanner) Err() error   { return nil }
 func (s *stubScanner) Close() error { return nil }
@@ -53,9 +46,6 @@ func (s *stubGitProvider) CreatePR(_ context.Context, _ gitprovider.PROptions) (
 }
 func (s *stubGitProvider) GetDefaultBranch(_ context.Context, _ string) (string, error) {
 	return "main", nil
-}
-func (s *stubGitProvider) IndexRepo(_ context.Context, _ string) (*gitprovider.RepoContext, error) {
-	return &gitprovider.RepoContext{Tree: "README.md"}, nil
 }
 func (s *stubGitProvider) ReplyToPRComment(_ context.Context, _ string, _ int, _ string) error {
 	return nil

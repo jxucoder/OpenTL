@@ -178,17 +178,19 @@ telecoder serve    # team server on :7080
 ## Package Layout
 
 ```
-pkg/agent/        Engine interface + Pi, Claude Code, OpenCode, Codex
-pkg/dispatcher/   LLM-powered event router + agent chain logic
-pkg/memory/       Cross-session vector store (sqlite-vec)
-pkg/store/        SQLite persistence
-pkg/sandbox/      Docker, SSH remote, pre-warming pool
+pkg/agent/        CodingAgent interface + Pi, Claude Code, OpenCode, Codex implementations
+pkg/dispatcher/   LLM-powered event router + agent chain evaluator
+pkg/memory/       Cross-session vector store (embedder interface + cosine similarity)
+pkg/scheduler/    Batch/cron job scheduler (YAML job definitions)
+pkg/store/        SQLite persistence (sessions, messages, events)
+pkg/sandbox/      Docker sandbox runtime, SSH remote, verify commands
 pkg/gitprovider/  GitHub PR creation + webhooks
-pkg/eventbus/     Real-time pub/sub
+pkg/eventbus/     Real-time pub/sub (in-memory)
 pkg/channel/      Slack, Telegram, Linear, Jira, GitHub Issues
-internal/engine/  Session orchestration
-internal/httpapi/ HTTP API + SSE
-cmd/telecoder/    CLI: serve, setup, run, list, status, logs
+pkg/model/        Core domain types (Session, Event, SubTask, etc.)
+internal/engine/  Session orchestration (uses pkg/agent interface)
+internal/httpapi/ HTTP API + SSE streaming
+cmd/telecoder/    CLI: serve, setup, run, list, status, logs, config
 ```
 
 Removed from v1: `pkg/llm/`, `pkg/pipeline/` (~1,500 lines — engines

@@ -29,10 +29,6 @@ import (
 	"github.com/jxucoder/TeleCoder/pkg/eventbus"
 	"github.com/jxucoder/TeleCoder/pkg/gitprovider"
 	ghProvider "github.com/jxucoder/TeleCoder/pkg/gitprovider/github"
-	"github.com/jxucoder/TeleCoder/pkg/llm"
-	llmAnthropic "github.com/jxucoder/TeleCoder/pkg/llm/anthropic"
-	llmOpenAI "github.com/jxucoder/TeleCoder/pkg/llm/openai"
-	"github.com/jxucoder/TeleCoder/pkg/pipeline"
 	"github.com/jxucoder/TeleCoder/pkg/sandbox"
 	dockerSandbox "github.com/jxucoder/TeleCoder/pkg/sandbox/docker"
 	"github.com/jxucoder/TeleCoder/pkg/store"
@@ -77,25 +73,18 @@ type Config struct {
 	CodingAgent string
 
 	// MaxSubTasks is the maximum number of sub-tasks the decompose stage may
-	// produce for a single task session (default 5, max 15). When a task is
-	// decomposed into multiple sub-tasks, the engine uses a persistent container
-	// with git checkpoints and progress tracking.
+	// produce for a single task session (default 5, max 15).
 	MaxSubTasks int
 }
 
 // Builder constructs a TeleCoder App.
 type Builder struct {
-	config    Config
-	store     store.SessionStore
-	bus       eventbus.Bus
-	sandbox   sandbox.Runtime
-	git       gitprovider.Provider
-	llm       llm.Client
-	plan      *pipeline.PlanStage
-	review    *pipeline.ReviewStage
-	decompose *pipeline.DecomposeStage
-	verify    *pipeline.VerifyStage
-	channels  []channel.Channel
+	config   Config
+	store    store.SessionStore
+	bus      eventbus.Bus
+	sandbox  sandbox.Runtime
+	git      gitprovider.Provider
+	channels []channel.Channel
 }
 
 // NewBuilder creates a new Builder with sensible defaults.
@@ -133,27 +122,6 @@ func (b *Builder) WithGitProvider(g gitprovider.Provider) *Builder {
 	return b
 }
 
-// WithLLM sets the LLM client for pipeline stages. This creates default
-// plan, review, and decompose stages using this client.
-func (b *Builder) WithLLM(client llm.Client) *Builder {
-	b.llm = client
-	return b
-}
-
-// WithPipelineStages sets custom pipeline stages.
-func (b *Builder) WithPipelineStages(plan *pipeline.PlanStage, review *pipeline.ReviewStage, decompose *pipeline.DecomposeStage) *Builder {
-	b.plan = plan
-	b.review = review
-	b.decompose = decompose
-	return b
-}
-
-// WithVerifyStage sets a custom verify (test/lint) stage.
-func (b *Builder) WithVerifyStage(v *pipeline.VerifyStage) *Builder {
-	b.verify = v
-	return b
-}
-
 // WithChannel adds a channel (Slack, Telegram, etc.) to the application.
 func (b *Builder) WithChannel(ch channel.Channel) *Builder {
 	b.channels = append(b.channels, ch)
@@ -182,10 +150,6 @@ func (b *Builder) Build() (*App, error) {
 		b.bus,
 		b.sandbox,
 		b.git,
-		b.plan,
-		b.review,
-		b.decompose,
-		b.verify,
 	)
 
 	handler := httpapi.New(eng)
@@ -213,7 +177,6 @@ func (a *App) Engine() *engine.Engine { return a.engine }
 func (a *App) Start(ctx context.Context) error {
 	a.engine.Start(ctx)
 
-	// Start channels.
 	for _, ch := range a.channels {
 		ch := ch
 		go func() {
@@ -248,9 +211,7 @@ func (a *App) Start(ctx context.Context) error {
 // Defaults
 // ---------------------------------------------------------------------------
 
-// applyDefaults fills in missing fields on the builder with sensible defaults.
 func applyDefaults(b *Builder) error {
-	// Config defaults.
 	if b.config.ServerAddr == "" {
 		b.config.ServerAddr = ":7080"
 	}
@@ -279,12 +240,10 @@ func applyDefaults(b *Builder) error {
 		b.config.MaxSubTasks = 5
 	}
 
-	// Ensure data dir exists.
 	if err := os.MkdirAll(b.config.DataDir, 0o755); err != nil {
 		return fmt.Errorf("creating data directory: %w", err)
 	}
 
-	// Store.
 	if b.store == nil {
 		st, err := sqliteStore.New(b.config.DatabasePath)
 		if err != nil {
@@ -293,17 +252,14 @@ func applyDefaults(b *Builder) error {
 		b.store = st
 	}
 
-	// Event bus.
 	if b.bus == nil {
 		b.bus = eventbus.NewInMemoryBus()
 	}
 
-	// Sandbox runtime.
 	if b.sandbox == nil {
 		b.sandbox = dockerSandbox.New()
 	}
 
-	// Git provider.
 	if b.git == nil {
 		token := os.Getenv("GITHUB_TOKEN")
 		if token != "" {
@@ -311,38 +267,6 @@ func applyDefaults(b *Builder) error {
 		}
 	}
 
-	// LLM + pipeline stages.
-	if b.llm == nil {
-		b.llm = llmClientFromEnv()
-	}
-
-	if b.llm != nil {
-		if b.plan == nil {
-			b.plan = pipeline.NewPlanStage(b.llm, "")
-		}
-		if b.review == nil {
-			b.review = pipeline.NewReviewStage(b.llm, "")
-		}
-		if b.decompose == nil {
-			b.decompose = pipeline.NewDecomposeStage(b.llm, "")
-		}
-		if b.verify == nil {
-			b.verify = pipeline.NewVerifyStage(b.llm, "")
-		}
-	}
-
-	return nil
-}
-
-// llmClientFromEnv creates an LLM client from environment variables.
-// Returns nil if no API key is found.
-func llmClientFromEnv() llm.Client {
-	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
-		return llmAnthropic.New(key, os.Getenv("TELECODER_LLM_MODEL"))
-	}
-	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
-		return llmOpenAI.New(key, os.Getenv("TELECODER_LLM_MODEL"))
-	}
 	return nil
 }
 
