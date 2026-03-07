@@ -1,0 +1,34 @@
+# TeleCoder Configuration
+
+[service]
+# Host and port for the TeleCoder service
+host = "127.0.0.1"
+port = 7830
+
+[runtime]
+# Runtime to use: "claude-code"
+type = "claude-code"
+# Path to the runtime binary (auto-detected if not set)
+# binary = "/usr/local/bin/claude"
+
+[runtime.env]
+# Environment variables passed to the runtime process
+# ANTHROPIC_API_KEY = "sk-ant-..."
+
+[storage]
+# Directory for session workspaces, logs, and artifacts
+data_dir = "/var/lib/telecoder"
+# SQLite database path (relative to data_dir if not absolute)
+db_path = "telecoder.db"
+
+[git]
+# Default branch prefix for session branches
+branch_prefix = "telecoder/"
+# Whether to auto-push branches after session completion
+auto_push = false
+
+[verify]
+# Default test command (overridable per session)
+# test_command = "npm test"
+# Default lint command (overridable per session)
+# lint_command = "npm run lint"

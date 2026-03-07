@@ -1,0 +1,16 @@
+[Unit]
+Description=TeleCoder - Remote Coding Agent Service
+After=network.target
+
+[Service]
+Type=simple
+User=telecoder
+Group=telecoder
+WorkingDirectory=/var/lib/telecoder
+ExecStart=/usr/local/bin/telecoder service start
+Restart=on-failure
+RestartSec=5
+Environment=TELECODER_CONFIG=/etc/telecoder/config.toml
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Session {{ session.id }} - TeleCoder{% endblock %}
+{% block content %}
+<div class="section">
+    <h2>Session {{ session.id }}
+        <span class="badge badge-{{ session.status }}">{{ session.status }}</span>
+    </h2>
+
+    <div class="info-grid">
+        <span class="info-label">Runtime</span>
+        <span class="info-value">{{ session.runtime_type }}</span>
+        <span class="info-label">Workspace</span>
+        <span class="info-value">{{ session.workspace_dir }}</span>
+        <span class="info-label">Repo URL</span>
+        <span class="info-value">{{ session.repo_url or '-' }}</span>
+        <span class="info-label">Repo Path</span>
+        <span class="info-value">{{ session.repo_path or '-' }}</span>
+        <span class="info-label">Branch</span>
+        <span class="info-value">{{ session.branch or '-' }}</span>
+        <span class="info-label">PID</span>
+        <span class="info-value">{{ session.pid or '-' }}</span>
+        <span class="info-label">Created</span>
+        <span class="info-value">{{ session.created_at }}</span>
+        <span class="info-label">Updated</span>
+        <span class="info-value">{{ session.updated_at }}</span>
+    </div>
+</div>
+
+{% if session.prompt %}
+<div class="section">
+    <h2>Last Prompt</h2>
+    <pre>{{ session.prompt }}</pre>
+</div>
+{% endif %}
+
+{% if changed_files %}
+<div class="section">
+    <h2>Changed Files ({{ changed_files|length }})</h2>
+    <pre>{% for f in changed_files %}{{ f }}
+{% endfor %}</pre>
+</div>
+{% endif %}
+
+{% if diff_summary %}
+<div class="section">
+    <h2>Diff Summary</h2>
+    <pre>{{ diff_summary }}</pre>
+</div>
+{% endif %}
+
+{% if stdout_logs %}
+<div class="section">
+    <h2>Output</h2>
+    <pre>{{ stdout_logs }}</pre>
+</div>
+{% endif %}
+
+{% if stderr_logs %}
+<div class="section">
+    <h2>Errors</h2>
+    <pre>{{ stderr_logs }}</pre>
+</div>
+{% endif %}
+
+{% if session.test_result %}
+<div class="section">
+    <h2>Test Result</h2>
+    <pre>{{ session.test_result }}</pre>
+</div>
+{% endif %}
+
+{% if session.status == 'running' %}
+<div class="section">
+    <button class="btn btn-danger" onclick="stopSession()">Stop Session</button>
+</div>
+<script>
+async function stopSession() {
+    await fetch('/api/session/{{ session.id }}/stop', { method: 'POST' });
+    location.reload();
+}
+</script>
+{% endif %}
+{% endblock %}

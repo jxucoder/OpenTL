@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}TeleCoder - Sessions{% endblock %}
+{% block content %}
+<div class="section">
+    <h2>Sessions</h2>
+    {% if sessions %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Status</th>
+                <th>Repo</th>
+                <th>Prompt</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for s in sessions %}
+            <tr>
+                <td><a href="/session/{{ s.id }}">{{ s.id }}</a></td>
+                <td><span class="badge badge-{{ s.status }}">{{ s.status }}</span></td>
+                <td>{{ s.repo_url or s.repo_path or '-' }}</td>
+                <td>{{ (s.prompt or '-')[:50] }}</td>
+                <td>{{ s.created_at }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p>No sessions yet. Create one with: <code>telecoder session create</code></p>
+    {% endif %}
+</div>
+{% endblock %}
