@@ -39,18 +39,14 @@ def _authorized(update: Update) -> bool:
 # ── State: one active session per Telegram chat ──────────────────────
 # chat_id -> session_id
 _sessions: dict[int, str] = {}
-# chat_id -> latest sprint_id
-_sprints: dict[int, str] = {}
 
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "Send me what to do. No plan, no approval — it runs immediately.\n\n"
+        "Send me what to do. It runs immediately.\n\n"
         "Commands:\n"
         "/new <repo-url> — create a session for a repo\n"
         "/status — check current session\n"
-        "/sprintstatus — check current sprint\n"
-        "/sprints — list all sprints\n"
         "/logs — last 30 lines of output\n"
         "/stop — stop current session\n\n"
         "Or just type what you want done."
@@ -121,37 +117,8 @@ async def cmd_stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Error: {e}")
 
 
-async def cmd_sprint_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Check status of the current sprint."""
-    if not _authorized(update):
-        return
-    chat_id = update.effective_chat.id
-    sprint_id = _sprints.get(chat_id)
-    if not sprint_id:
-        await update.message.reply_text("No active sprint.")
-        return
-    try:
-        info = telecoder.sprint_status(sprint_id)
-        await update.message.reply_text(f"```\n{info}\n```", parse_mode="Markdown")
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
-
-
-async def cmd_sprints(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """List all sprints."""
-    if not _authorized(update):
-        return
-    try:
-        output = telecoder.sprint_list()
-        if len(output) > 4000:
-            output = "…" + output[-4000:]
-        await update.message.reply_text(f"```\n{output}\n```", parse_mode="Markdown")
-    except Exception as e:
-        await update.message.reply_text(f"Error: {e}")
-
-
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """Plain English message → sprint. No plan, no approval. Just execute."""
+    """Plain English message → create session if needed → run immediately."""
     if not _authorized(update):
         return
 
@@ -163,18 +130,19 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     sid = _sessions.get(chat_id)
 
-    # Sprint in existing session, or create a new one
+    # Auto-create a session if none exists
+    if not sid:
+        try:
+            sid = telecoder.create().strip()
+            _sessions[chat_id] = sid
+        except Exception as e:
+            await update.message.reply_text(f"Could not create session: {e}")
+            return
+
+    # Send the message as-is to Claude Code
     await update.message.reply_text("On it.")
     try:
-        result = telecoder.sprint(text, session_id=sid)
-
-        # Parse sprint:xxx session:xxx from result
-        for part in result.split():
-            if part.startswith("sprint:"):
-                _sprints[chat_id] = part.split(":", 1)[1]
-            elif part.startswith("session:"):
-                _sessions[chat_id] = part.split(":", 1)[1]
-
+        result = telecoder.run(sid, text)
         await update.message.reply_text(result)
     except Exception as e:
         await update.message.reply_text(f"Error: {e}")
@@ -193,8 +161,6 @@ def main() -> None:
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("logs", cmd_logs))
     app.add_handler(CommandHandler("stop", cmd_stop))
-    app.add_handler(CommandHandler("sprintstatus", cmd_sprint_status))
-    app.add_handler(CommandHandler("sprints", cmd_sprints))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     log.info("Bot started — polling for messages")
