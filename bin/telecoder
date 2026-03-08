@@ -30,6 +30,7 @@ TELECODER_AUTO_PUSH="${TELECODER_AUTO_PUSH:-false}"
 source "${LIB_DIR}/db.sh"
 source "${LIB_DIR}/session.sh"
 source "${LIB_DIR}/verify.sh"
+source "${LIB_DIR}/sprint.sh"
 
 # --- Commands ---
 
@@ -138,6 +139,58 @@ cmd_verify() {
     session_verify "$1"
 }
 
+cmd_sprint() {
+    if [ $# -lt 1 ]; then
+        echo "Usage: telecoder sprint <goal> [options]" >&2
+        echo "       telecoder sprint --in <session-id> <goal>" >&2
+        return 1
+    fi
+
+    local goal="" repo_url="" repo_path="" branch="" test_cmd="" lint_cmd="" session_id=""
+
+    # Collect all args — goal is everything that isn't a flag
+    local goal_parts=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --repo-url)  repo_url="$2";  shift 2 ;;
+            --repo-path) repo_path="$2"; shift 2 ;;
+            --branch)    branch="$2";    shift 2 ;;
+            --test-cmd)  test_cmd="$2";  shift 2 ;;
+            --lint-cmd)  lint_cmd="$2";  shift 2 ;;
+            --in)        session_id="$2"; shift 2 ;;
+            *) goal_parts+=("$1"); shift ;;
+        esac
+    done
+    goal="${goal_parts[*]}"
+
+    if [ -z "$goal" ]; then
+        echo "No goal provided." >&2
+        return 1
+    fi
+
+    if [ -n "$session_id" ]; then
+        sprint_create_in_session "$session_id" "$goal"
+    else
+        sprint_create "$goal" "$repo_url" "$repo_path" "$branch" "$test_cmd" "$lint_cmd"
+    fi
+}
+
+cmd_sprint_status() {
+    if [ $# -lt 1 ]; then
+        echo "Usage: telecoder sprint-status <sprint-id>" >&2
+        return 1
+    fi
+    sprint_status "$1"
+}
+
+cmd_sprint_list() {
+    local status_filter=""
+    if [ $# -gt 0 ] && [ "$1" = "--status" ] && [ $# -gt 1 ]; then
+        status_filter="$2"
+    fi
+    sprint_list "$status_filter"
+}
+
 cmd_delete() {
     if [ $# -lt 1 ]; then
         echo "Usage: telecoder delete <session-id>" >&2
@@ -171,10 +224,20 @@ Commands:
   logs <id> [--stream stderr]   View session logs
   attach <id>                   Attach to tmux session
   verify <id>                   Run tests/lint
+  sprint <goal> [options]       Create and execute a sprint immediately
+    --repo-url <url>              Git repo to clone
+    --repo-path <path>            Local repo path
+    --branch <name>               Branch name
+    --test-cmd <cmd>              Test command (auto-verify on completion)
+    --lint-cmd <cmd>              Lint command (auto-verify on completion)
+    --in <session-id>             Run sprint in existing session
+  sprint-status <sprint-id>     Check sprint progress
+  sprint-list [--status <s>]    List all sprints
   delete <id>                   Delete a session
   help                          Show this help
 
-Session runs in tmux. Close your terminal — it keeps going.
+Sprints: you prompt, it runs. No plan, no approval.
+Sessions run in tmux. Close your terminal — it keeps going.
 Come back with: telecoder attach <id>
 EOF
 }
@@ -194,6 +257,9 @@ case "$cmd" in
     logs)    cmd_logs "$@" ;;
     attach)  cmd_attach "$@" ;;
     verify)  cmd_verify "$@" ;;
+    sprint)         cmd_sprint "$@" ;;
+    sprint-status)  cmd_sprint_status "$@" ;;
+    sprint-list|sprints) cmd_sprint_list "$@" ;;
     delete)  cmd_delete "$@" ;;
     help|-h|--help)    cmd_help ;;
     version|--version) echo "telecoder v${VERSION}" ;;

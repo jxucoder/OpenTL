@@ -20,6 +20,16 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS sprints (
+    id          TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL REFERENCES sessions(id),
+    goal        TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'running',
+    result      TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+);
 SQL
 }
 

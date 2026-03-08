@@ -71,3 +71,41 @@ def list_sessions(status: str | None = None) -> str:
     if status:
         args += ["--status", status]
     return _run(*args)
+
+
+# --- Sprints ---
+
+def sprint(
+    goal: str,
+    *,
+    session_id: str | None = None,
+    repo_url: str | None = None,
+    repo_path: str | None = None,
+    test_cmd: str | None = None,
+    lint_cmd: str | None = None,
+) -> str:
+    """Create and execute a sprint immediately. No plan, no approval."""
+    args = ["sprint"]
+    if session_id:
+        args += ["--in", session_id]
+    if repo_url:
+        args += ["--repo-url", repo_url]
+    if repo_path:
+        args += ["--repo-path", repo_path]
+    if test_cmd:
+        args += ["--test-cmd", test_cmd]
+    if lint_cmd:
+        args += ["--lint-cmd", lint_cmd]
+    args.append(goal)
+    return _run(*args)
+
+
+def sprint_status(sprint_id: str) -> str:
+    return _run("sprint-status", sprint_id)
+
+
+def sprint_list(status: str | None = None) -> str:
+    args = ["sprint-list"]
+    if status:
+        args += ["--status", status]
+    return _run(*args)
