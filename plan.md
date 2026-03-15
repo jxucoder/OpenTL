@@ -41,6 +41,8 @@ V1 should make explicit decisions instead of staying abstract.
 
 - support one runtime well
 - default target: Claude Code first
+- communicate with the runtime via ACP (Agent Client Protocol)
+- use the Go SDK: `github.com/coder/acp-go-sdk`
 
 ### Persistence
 
@@ -108,7 +110,7 @@ V1 system layout:
 [TeleCoder Service]
  - config
  - session manager
- - runtime launcher
+ - ACP client
  - SQLite
  - local artifacts
   |
@@ -117,7 +119,8 @@ V1 system layout:
   v                             v
 [Session Workspace]        [Session Workspace]
  - repo                    - repo
- - runtime process         - runtime process
+ - agent process (ACP)     - agent process (ACP)
+ - JSON-RPC over stdio     - JSON-RPC over stdio
  - logs                    - logs
  - outputs                 - outputs
 ```
@@ -150,35 +153,50 @@ Suggested outputs:
 - `data/` directory structure
 - `systemd` unit template
 
-## 2. Runtime Adapter
+## 2. Runtime Adapter (ACP Client)
 
 Deliver:
 
-- one runtime adapter
-- runtime launch/stop/status
-- stdout/stderr capture
+- ACP client using `github.com/coder/acp-go-sdk`
+- spawn agent process with ACP mode (e.g. `claude --acp`)
+- JSON-RPC 2.0 over stdin/stdout
+- Initialize handshake, session creation, prompt execution
+- streaming SessionUpdate events mapped to TeleCoder events
+- agent process lifecycle management (start, stop, cleanup)
 - session working directory management
+
+The runtime adapter is an ACP client, not a shell command wrapper.
+TeleCoder talks to agents using the Agent Client Protocol — a standard
+JSON-RPC 2.0 protocol over stdio, similar to LSP.
+
+This means:
+
+- no custom marker protocol for event parsing
+- no per-agent adapter code
+- any ACP-compatible agent works without code changes
+- chat mode is native (multi-turn prompts over one connection)
 
 Important rule:
 
-Do not start by designing a perfect runtime abstraction.
-Start with one concrete runtime path that works.
+Start with Claude Code as the first ACP agent.
+Do not build a fallback shell adapter until a real need exists.
 
 ## 3. Session Engine
 
 Deliver:
 
-- create session
+- create session (also creates ACP session via `NewSession`)
 - attach repo + working state
-- start run
-- stop run
+- start run (sends `Prompt` over ACP, streams `SessionUpdate` events)
+- stop run (sends ACP cancellation)
 - persist session metadata
 - list sessions
-- resume session
+- resume session (reconnects ACP or creates new session with context)
 
 Core session fields:
 
 - id
+- acp session id
 - repo path or repo URL
 - working directory
 - runtime type
@@ -277,15 +295,15 @@ Good docs are part of the product.
 
 Goal:
 
-Prove TeleCoder can launch the chosen runtime on a VPS, keep it alive, and
-capture outputs.
+Prove TeleCoder can communicate with Claude Code over ACP on a VPS.
 
 Exit criteria:
 
-- chosen runtime works on target VPS
-- prompt can be run remotely
-- logs can be captured
-- process can be stopped and restarted
+- Claude Code launches in ACP mode on target VPS
+- ACP Initialize handshake succeeds
+- a prompt can be sent and a response received over ACP
+- SessionUpdate events stream correctly
+- the agent process can be stopped and restarted
 
 ## Milestone 1: Session Core
 
@@ -355,24 +373,27 @@ Exit criteria:
 
 ## Recommended Build Order
 
-1. Choose the exact v1 runtime.
-2. Prove the runtime can run unattended on Ubuntu VPS.
+1. ~~Choose the exact v1 runtime.~~ **Done: Claude Code via ACP.**
+2. Prove ACP works: spawn Claude Code in ACP mode, complete a handshake,
+   send a prompt, receive a response. Do this on the target Ubuntu VPS.
 3. Build session persistence with SQLite.
 4. Build workspace management for one repo per session.
-5. Build CLI for create/run/stop/resume.
-6. Add verification commands and result summaries.
-7. Build the install script and systemd service.
-8. Add the small web UI.
+5. Build the ACP client adapter that maps ACP events to TeleCoder events.
+6. Build CLI for create/run/stop/resume.
+7. Add verification commands and result summaries.
+8. Build the install script and systemd service.
+9. Add the small web UI.
 
 ## Open Decisions
 
 These should be resolved early:
 
-- What exact runtime is v1 using?
+- ~~What exact runtime is v1 using?~~ **Resolved: Claude Code via ACP.**
 - What exact install path do we ship?
 - How does the runtime get credentials?
 - Do we support branch push in v1 by default or only when configured?
 - Is the web UI served by the same service or a separate lightweight frontend?
+- What is the exact CLI flag to launch Claude Code in ACP mode?
 
 ## Risks
 
