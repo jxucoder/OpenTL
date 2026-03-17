@@ -13,6 +13,10 @@ It delegates the actual coding to existing agents (Codex, Claude, OpenCode, etc.
 - **Reactive** -- send a prompt, get durable results you can inspect later
 - **Proactive** -- set up watches that fire automatically on CI failures or new PRs
 
+TeleCoder also stores structured session outcomes so you can review what
+changed, what was verified, what remains uncertain, and what should happen
+next without rereading a full transcript.
+
 ## Quick Start
 
 ### Prerequisites
@@ -60,6 +64,9 @@ bun run status <session-id>
 # See the event stream
 bun run events <session-id>
 
+# See the outcome-first inbox
+bun run inbox
+
 # Rerun a failed or completed session
 bun src/cli.ts rerun <session-id>
 ```
@@ -82,6 +89,9 @@ curl http://localhost:7080/api/sessions
 
 # Get session details
 curl http://localhost:7080/api/sessions/<id>
+
+# Review the outcome-first inbox
+curl http://localhost:7080/api/inbox
 
 # Stream events (SSE)
 curl -H "Accept: text/event-stream" http://localhost:7080/api/sessions/<id>/events
@@ -148,6 +158,13 @@ bun src/cli.ts watch-list --kind ci_failure --status active
 # See run history for a watch
 bun src/cli.ts watch-runs <watch-id>
 ```
+
+Watch runs and completed sessions are summarized into outcome fields:
+
+- `Changed`
+- `Verified`
+- `Uncertain`
+- `Next`
 
 ## Publishing Results as PRs
 
@@ -298,6 +315,7 @@ src/
   workspace.ts    Git workspace preparation
   publish.ts      PR publishing and GitHub integration
   watch.ts        Watch logic, matching, and prompting
+  outcome.ts      Structured session outcome extraction
   runtime/
     acpx.ts       ACP protocol integration
 test/
@@ -362,6 +380,7 @@ Then add `"mymode"` to the `TeleCoderPolicyMode` type in `src/types.ts`.
 |--------|------|-------------|
 | `POST` | `/api/sessions` | Create a task (`{repo, prompt, agent?, policy?}`) |
 | `GET` | `/api/sessions` | List sessions (`?status=&agent=&policy=&parent=&lineage=`) |
+| `GET` | `/api/inbox` | List recent completed/failed sessions with structured outcomes |
 | `GET` | `/api/sessions/:id` | Get session details |
 | `POST` | `/api/sessions/:id/rerun` | Rerun a finished session |
 | `GET` | `/api/sessions/:id/events` | Get events (JSON or SSE with `Accept: text/event-stream`) |
@@ -383,6 +402,17 @@ Then add `"mymode"` to the `TeleCoderPolicyMode` type in `src/types.ts`.
 |--------|------|-------------|
 | `POST` | `/api/watch-events/ci` | Trigger CI watches (`{repo, workflow, branch, runId, ...}`) |
 | `POST` | `/api/watch-events/pr` | Trigger PR watches (`{repo, prNumber, title, base, head, ...}`) |
+
+## Current Direction
+
+The current product direction is:
+
+1. durable background sessions
+2. warm reusable workspaces
+3. outcome-first review instead of transcript-first review
+
+This repo now includes the first slice of that direction through structured
+session outcomes and the inbox API/CLI surface.
 
 ## How It Works
 

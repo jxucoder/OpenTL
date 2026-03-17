@@ -58,6 +58,7 @@ Commands:
   bun src/cli.ts events <session-id>
   bun src/cli.ts lineage <session-id>
   bun src/cli.ts list [--status <status|active>] [--agent <agent>] [--policy <locked|observe|standard>] [--parent <session-id>] [--lineage <session-id>]
+  bun src/cli.ts inbox [--limit <n>]
   bun src/cli.ts config
 `.trim();
 }
@@ -113,6 +114,19 @@ function parsePolicyFlag(raw: string | boolean | undefined): TeleCoderPolicyMode
   }
 
   return parsePolicyMode(raw);
+}
+
+function parseLimitFlag(raw: string | boolean | undefined): number | undefined {
+  if (typeof raw !== "string" || raw.trim() === "") {
+    return undefined;
+  }
+
+  const limit = Number.parseInt(raw, 10);
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new Error(`Invalid --limit: ${raw}`);
+  }
+
+  return limit;
 }
 
 function printEvent(type: string, data: string): void {
@@ -423,6 +437,11 @@ async function main(): Promise<void> {
       case "list": {
         const parsed = parseArgs(rest);
         console.log(JSON.stringify(engine.listSessions(parseSessionListQuery(parsed.flags)), null, 2));
+        return;
+      }
+      case "inbox": {
+        const parsed = parseArgs(rest);
+        console.log(JSON.stringify(engine.listInbox(parseLimitFlag(parsed.flags.get("limit"))), null, 2));
         return;
       }
       case "config": {

@@ -34,6 +34,19 @@ function parseSessionStatusFilter(raw: string | null): SessionStatusFilter | und
   }
 }
 
+function parseLimit(raw: string | null): number | undefined {
+  if (!raw) {
+    return undefined;
+  }
+
+  const limit = Number.parseInt(raw, 10);
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new Error(`Invalid limit: ${raw}`);
+  }
+
+  return limit;
+}
+
 function parseSessionListQuery(url: URL): SessionListQuery {
   return {
     status: parseSessionStatusFilter(url.searchParams.get("status")),
@@ -82,6 +95,15 @@ export async function handleRequest(
   if (request.method === "GET" && path === "/api/sessions") {
     try {
       return json(engine.listSessions(parseSessionListQuery(url)));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return json({ error: message }, 400);
+    }
+  }
+
+  if (request.method === "GET" && path === "/api/inbox") {
+    try {
+      return json(engine.listInbox(parseLimit(url.searchParams.get("limit"))));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return json({ error: message }, 400);

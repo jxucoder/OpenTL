@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 
+import { deriveSessionOutcome } from "./outcome.ts";
 import { buildWatchReturnSummary, summarizeWatchOutcome } from "./watch.ts";
 import type {
   SessionEvent,
@@ -30,6 +31,11 @@ interface SessionRow {
   prompt: string;
   repo: string;
   result_text: string;
+  outcome_changed: string;
+  outcome_headline: string;
+  outcome_next: string;
+  outcome_uncertain: string;
+  outcome_verified: string;
   runtime_command: string;
   started_at: string;
   status: SessionRecord["status"];
@@ -68,6 +74,11 @@ interface WatchRunRow {
   id: number;
   result_agent: string;
   result_error: string;
+  result_outcome_changed: string;
+  result_outcome_headline: string;
+  result_outcome_next: string;
+  result_outcome_uncertain: string;
+  result_outcome_verified: string;
   result_policy_mode: SessionRecord["policyMode"];
   result_status: SessionRecord["status"] | null;
   result_text: string;
@@ -94,6 +105,19 @@ function isUniqueConstraintError(error: unknown, tableColumns: string): boolean 
 }
 
 function mapSession(row: SessionRow): SessionRecord {
+  const derivedOutcome =
+    row.outcome_headline ||
+    row.outcome_changed ||
+    row.outcome_verified ||
+    row.outcome_uncertain ||
+    row.outcome_next
+      ? null
+      : deriveSessionOutcome({
+          status: row.status,
+          resultText: row.result_text,
+          error: row.error,
+        });
+
   return {
     id: row.id,
     repo: row.repo,
@@ -111,6 +135,11 @@ function mapSession(row: SessionRow): SessionRecord {
     branch: row.branch,
     workDir: row.work_dir,
     resultText: row.result_text,
+    outcomeHeadline: row.outcome_headline || derivedOutcome?.outcomeHeadline || "",
+    outcomeChanged: row.outcome_changed || derivedOutcome?.outcomeChanged || "",
+    outcomeVerified: row.outcome_verified || derivedOutcome?.outcomeVerified || "",
+    outcomeUncertain: row.outcome_uncertain || derivedOutcome?.outcomeUncertain || "",
+    outcomeNext: row.outcome_next || derivedOutcome?.outcomeNext || "",
     error: row.error,
     failureKind: row.failure_kind,
     claimedAt: row.claimed_at,
@@ -143,6 +172,11 @@ function mapWatch(row: WatchRow): WatchRecord {
 function mapWatchRun(row: WatchRunRow): WatchRunRecord {
   const resultSummary = row.result_status
     ? summarizeWatchOutcome({
+        outcomeChanged: row.result_outcome_changed,
+        outcomeHeadline: row.result_outcome_headline,
+        outcomeNext: row.result_outcome_next,
+        outcomeUncertain: row.result_outcome_uncertain,
+        outcomeVerified: row.result_outcome_verified,
         status: row.result_status,
         resultText: row.result_text,
         error: row.result_error,
@@ -161,6 +195,11 @@ function mapWatchRun(row: WatchRunRow): WatchRunRecord {
       ? buildWatchReturnSummary(row.trigger_summary, {
           agent: row.result_agent,
           error: row.result_error,
+          outcomeChanged: row.result_outcome_changed,
+          outcomeHeadline: row.result_outcome_headline,
+          outcomeNext: row.result_outcome_next,
+          outcomeUncertain: row.result_outcome_uncertain,
+          outcomeVerified: row.result_outcome_verified,
           policyMode: row.result_policy_mode,
           resultText: row.result_text,
           runtimeCommand: row.result_runtime_command,
@@ -175,7 +214,8 @@ function mapWatchRun(row: WatchRunRow): WatchRunRecord {
 const sessionSelect = `SELECT
   id, repo, prompt, agent, parent_session_id, attempt, policy_mode, effective_permission_mode,
   workspace_write_policy, max_runtime_seconds, runtime_command, status, owner_id, branch, work_dir,
-  result_text, error, failure_kind, claimed_at, heartbeat_at, started_at, finished_at,
+  result_text, outcome_headline, outcome_changed, outcome_verified, outcome_uncertain, outcome_next,
+  error, failure_kind, claimed_at, heartbeat_at, started_at, finished_at,
   created_at, updated_at
 FROM sessions`;
 
@@ -324,6 +364,11 @@ export class TeleCoderStore {
     prompt: string;
     repo: string;
     resultText?: string;
+    outcomeChanged?: string;
+    outcomeHeadline?: string;
+    outcomeNext?: string;
+    outcomeUncertain?: string;
+    outcomeVerified?: string;
     runtimeCommand?: string;
     startedAt?: string;
     status?: SessionRecord["status"];
@@ -331,6 +376,14 @@ export class TeleCoderStore {
     workspaceWritePolicy?: SessionRecord["workspaceWritePolicy"];
   }): SessionRecord {
     const createdAt = nowIso();
+    const status = input.status ?? "pending";
+    const resultText = input.resultText ?? "";
+    const error = input.error ?? "";
+    const derivedOutcome = deriveSessionOutcome({
+      status,
+      resultText,
+      error,
+    });
     const session: SessionRecord = {
       id: input.id,
       repo: input.repo,
@@ -343,12 +396,17 @@ export class TeleCoderStore {
       workspaceWritePolicy: input.workspaceWritePolicy ?? "blocked",
       maxRuntimeSeconds: input.maxRuntimeSeconds ?? 180,
       runtimeCommand: input.runtimeCommand ?? input.agent,
-      status: input.status ?? "pending",
+      status,
       ownerId: input.ownerId ?? "",
       branch: input.branch ?? "",
       workDir: input.workDir ?? "",
-      resultText: input.resultText ?? "",
-      error: input.error ?? "",
+      resultText,
+      outcomeHeadline: input.outcomeHeadline ?? derivedOutcome.outcomeHeadline,
+      outcomeChanged: input.outcomeChanged ?? derivedOutcome.outcomeChanged,
+      outcomeVerified: input.outcomeVerified ?? derivedOutcome.outcomeVerified,
+      outcomeUncertain: input.outcomeUncertain ?? derivedOutcome.outcomeUncertain,
+      outcomeNext: input.outcomeNext ?? derivedOutcome.outcomeNext,
+      error,
       failureKind: input.failureKind ?? "",
       claimedAt: input.claimedAt ?? "",
       heartbeatAt: input.heartbeatAt ?? "",
@@ -363,9 +421,10 @@ export class TeleCoderStore {
         `INSERT INTO sessions (
           id, repo, prompt, agent, parent_session_id, attempt, policy_mode, effective_permission_mode,
           workspace_write_policy, max_runtime_seconds, runtime_command, status, owner_id, branch,
-          work_dir, result_text, error, failure_kind, claimed_at, heartbeat_at, started_at,
-          finished_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          work_dir, result_text, outcome_headline, outcome_changed, outcome_verified,
+          outcome_uncertain, outcome_next, error, failure_kind, claimed_at, heartbeat_at,
+          started_at, finished_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         session.id,
@@ -384,6 +443,11 @@ export class TeleCoderStore {
         session.branch,
         session.workDir,
         session.resultText,
+        session.outcomeHeadline,
+        session.outcomeChanged,
+        session.outcomeVerified,
+        session.outcomeUncertain,
+        session.outcomeNext,
         session.error,
         session.failureKind,
         session.claimedAt,
@@ -423,6 +487,11 @@ export class TeleCoderStore {
         `SELECT
            wr.id, wr.watch_id, wr.session_id, wr.event_key, wr.source_ref, wr.trigger_summary,
            wr.created_at, s.status AS result_status, s.result_text, s.error AS result_error,
+           s.outcome_headline AS result_outcome_headline,
+           s.outcome_changed AS result_outcome_changed,
+           s.outcome_verified AS result_outcome_verified,
+           s.outcome_uncertain AS result_outcome_uncertain,
+           s.outcome_next AS result_outcome_next,
            s.agent AS result_agent, s.runtime_command AS result_runtime_command,
            s.policy_mode AS result_policy_mode,
            s.workspace_write_policy AS result_workspace_write_policy
@@ -535,6 +604,11 @@ export class TeleCoderStore {
         `SELECT
            wr.id, wr.watch_id, wr.session_id, wr.event_key, wr.source_ref, wr.trigger_summary,
            wr.created_at, s.status AS result_status, s.result_text, s.error AS result_error,
+           s.outcome_headline AS result_outcome_headline,
+           s.outcome_changed AS result_outcome_changed,
+           s.outcome_verified AS result_outcome_verified,
+           s.outcome_uncertain AS result_outcome_uncertain,
+           s.outcome_next AS result_outcome_next,
            s.agent AS result_agent, s.runtime_command AS result_runtime_command,
            s.policy_mode AS result_policy_mode,
            s.workspace_write_policy AS result_workspace_write_policy
@@ -561,6 +635,11 @@ export class TeleCoderStore {
         `SELECT
            wr.id, wr.watch_id, wr.session_id, wr.event_key, wr.source_ref, wr.trigger_summary,
            wr.created_at, s.status AS result_status, s.result_text, s.error AS result_error,
+           s.outcome_headline AS result_outcome_headline,
+           s.outcome_changed AS result_outcome_changed,
+           s.outcome_verified AS result_outcome_verified,
+           s.outcome_uncertain AS result_outcome_uncertain,
+           s.outcome_next AS result_outcome_next,
            s.agent AS result_agent, s.runtime_command AS result_runtime_command,
            s.policy_mode AS result_policy_mode,
            s.workspace_write_policy AS result_workspace_write_policy
@@ -622,6 +701,20 @@ export class TeleCoderStore {
     return rows.map(mapSession);
   }
 
+  listInboxSessions(limit = 20): SessionRecord[] {
+    const safeLimit = Math.max(1, Math.min(limit, 200));
+    const rows = this.db
+      .query(
+        `${sessionSelect}
+         WHERE status IN ('complete', 'error')
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT ?`,
+      )
+      .all(safeLimit) as SessionRow[];
+
+    return rows.map(mapSession);
+  }
+
   updateSession(
     id: string,
     patch: Partial<
@@ -651,13 +744,24 @@ export class TeleCoderStore {
       ...patch,
       updatedAt: nowIso(),
     };
+    const derivedOutcome = deriveSessionOutcome({
+      status: next.status,
+      resultText: next.resultText,
+      error: next.error,
+    });
+    next.outcomeHeadline = derivedOutcome.outcomeHeadline;
+    next.outcomeChanged = derivedOutcome.outcomeChanged;
+    next.outcomeVerified = derivedOutcome.outcomeVerified;
+    next.outcomeUncertain = derivedOutcome.outcomeUncertain;
+    next.outcomeNext = derivedOutcome.outcomeNext;
 
     this.db
       .query(
         `UPDATE sessions
-         SET status = ?, owner_id = ?, branch = ?, work_dir = ?, result_text = ?, error = ?,
-             failure_kind = ?, claimed_at = ?, heartbeat_at = ?, started_at = ?, finished_at = ?,
-             updated_at = ?
+         SET status = ?, owner_id = ?, branch = ?, work_dir = ?, result_text = ?,
+             outcome_headline = ?, outcome_changed = ?, outcome_verified = ?,
+             outcome_uncertain = ?, outcome_next = ?, error = ?, failure_kind = ?,
+             claimed_at = ?, heartbeat_at = ?, started_at = ?, finished_at = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
@@ -666,6 +770,11 @@ export class TeleCoderStore {
         next.branch,
         next.workDir,
         next.resultText,
+        next.outcomeHeadline,
+        next.outcomeChanged,
+        next.outcomeVerified,
+        next.outcomeUncertain,
+        next.outcomeNext,
         next.error,
         next.failureKind,
         next.claimedAt,
@@ -863,6 +972,11 @@ export class TeleCoderStore {
           branch TEXT NOT NULL DEFAULT '',
           work_dir TEXT NOT NULL DEFAULT '',
           result_text TEXT NOT NULL DEFAULT '',
+          outcome_headline TEXT NOT NULL DEFAULT '',
+          outcome_changed TEXT NOT NULL DEFAULT '',
+          outcome_verified TEXT NOT NULL DEFAULT '',
+          outcome_uncertain TEXT NOT NULL DEFAULT '',
+          outcome_next TEXT NOT NULL DEFAULT '',
           error TEXT NOT NULL DEFAULT '',
           failure_kind TEXT NOT NULL DEFAULT '',
           claimed_at TEXT NOT NULL DEFAULT '',
@@ -967,6 +1081,17 @@ export class TeleCoderStore {
       this.ensureWatchColumn("head_branch", "TEXT NOT NULL DEFAULT ''");
       this.db.exec(`
         PRAGMA user_version = 6;
+      `);
+    }
+
+    if (version < 7) {
+      this.ensureSessionColumn("outcome_headline", "TEXT NOT NULL DEFAULT ''");
+      this.ensureSessionColumn("outcome_changed", "TEXT NOT NULL DEFAULT ''");
+      this.ensureSessionColumn("outcome_verified", "TEXT NOT NULL DEFAULT ''");
+      this.ensureSessionColumn("outcome_uncertain", "TEXT NOT NULL DEFAULT ''");
+      this.ensureSessionColumn("outcome_next", "TEXT NOT NULL DEFAULT ''");
+      this.db.exec(`
+        PRAGMA user_version = 7;
       `);
     }
   }

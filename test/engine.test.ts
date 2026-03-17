@@ -216,6 +216,8 @@ test("engine requeues pending sessions on startup", async () => {
 
   expect(session?.status).toBe("complete");
   expect(session?.resultText).toBe("recovered output");
+  expect(session?.outcomeHeadline).toBe("recovered output");
+  expect(session?.outcomeChanged).toBe("recovered output");
   expect(session?.policyMode).toBe("observe");
   expect(session?.startedAt).not.toBe("");
   expect(events[0]?.type).toBe("status");
@@ -262,6 +264,7 @@ test("engine reruns a finished session with explicit lineage", async () => {
   expect(session?.policyMode).toBe("observe");
   expect(session?.status).toBe("complete");
   expect(session?.resultText).toBe("rerun output");
+  expect(session?.outcomeHeadline).toBe("rerun output");
   expect(events[0]?.type).toBe("status");
   expect(events[0]?.data).toBe("Rerun requested from session finished-session");
 });
@@ -328,6 +331,7 @@ test("engine records requested policy and runtime metadata", async () => {
   expect(loaded?.workspaceWritePolicy).toBe("contained");
   expect(loaded?.maxRuntimeSeconds).toBe(300);
   expect(loaded?.runtimeCommand).toBe("claude");
+  expect(loaded?.outcomeHeadline).toBe("policy output");
   expect(runtimeCalls).toEqual([
     {
       permissionMode: "approve-all",
@@ -361,6 +365,8 @@ test("engine records policy-denied runtime failures", async () => {
   expect(loaded?.status).toBe("error");
   expect(loaded?.failureKind).toBe("policy_denied");
   expect(loaded?.error).toContain("permission denied");
+  expect(loaded?.outcomeHeadline).toContain("Failed:");
+  expect(loaded?.outcomeUncertain).toContain("permission denied");
 });
 
 test("engine triggers matching CI watches and records run history", async () => {

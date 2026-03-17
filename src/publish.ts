@@ -97,20 +97,29 @@ export async function resolveGitHubToken(): Promise<string> {
 }
 
 function defaultTitle(session: SessionRecord): string {
-  const firstLine = session.resultText.trim().split("\n")[0]?.trim();
-  if (firstLine) {
-    return `TeleCoder: ${firstLine.slice(0, 60)}`;
+  const headline = session.outcomeHeadline.trim() || session.resultText.trim().split("\n")[0]?.trim();
+  if (headline) {
+    return `TeleCoder: ${headline.slice(0, 60)}`;
   }
 
   return `TeleCoder session ${session.id}`;
 }
 
 function defaultBody(session: SessionRecord): string {
-  const summary = session.resultText.trim() || "No result text captured.";
+  const summary = session.outcomeChanged || session.outcomeHeadline || "No result text captured.";
+  const verified = session.outcomeVerified || "Not explicitly verified.";
+  const uncertain = session.outcomeUncertain || "No additional uncertainty reported.";
+  const next = session.outcomeNext || "Review the session output and decide whether to publish.";
 
   return [
     "## Summary",
     summary,
+    "",
+    "## Outcome",
+    `- Changed: ${summary}`,
+    `- Verified: ${verified}`,
+    `- Uncertain: ${uncertain}`,
+    `- Next: ${next}`,
     "",
     "## TeleCoder Session",
     `- Session: ${session.id}`,

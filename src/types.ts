@@ -43,6 +43,11 @@ export interface SessionRecord {
   branch: string;
   workDir: string;
   resultText: string;
+  outcomeHeadline: string;
+  outcomeChanged: string;
+  outcomeVerified: string;
+  outcomeUncertain: string;
+  outcomeNext: string;
   error: string;
   failureKind: FailureKind;
   claimedAt: string;

@@ -141,6 +141,10 @@ export class TeleCoderEngine {
     return this.store.listSessions(query);
   }
 
+  listInbox(limit = 20): SessionRecord[] {
+    return this.store.listInboxSessions(limit);
+  }
+
   createCiWatch(input: CreateCiWatchInput): WatchRecord {
     return this.store.createWatch({
       id: randomUUID().slice(0, 8),

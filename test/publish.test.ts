@@ -110,6 +110,11 @@ async function createPublishFixture(
       workDir,
       resultText:
         "Changed: Adds a README note.\nVerified: README updated.\nUncertain: None.\nNext: Open the PR.",
+      outcomeHeadline: "Adds a README note.",
+      outcomeChanged: "Adds a README note.",
+      outcomeVerified: "README updated.",
+      outcomeUncertain: "None.",
+      outcomeNext: "Open the PR.",
       error: "",
       failureKind: "",
       claimedAt: "",

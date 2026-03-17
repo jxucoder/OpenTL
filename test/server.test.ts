@@ -286,6 +286,56 @@ test("GET /api/sessions supports status, parent, and policy filters", async () =
   expect(body.map((session) => session.id)).toEqual(["child"]);
 });
 
+test("GET /api/inbox returns structured session outcomes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "telecoder-server-"));
+  cleanup.push(dir);
+
+  const store = new TeleCoderStore(join(dir, "telecoder.sqlite"));
+  store.createSession({
+    id: "complete",
+    repo: "git@example.com/repo.git",
+    prompt: "complete",
+    agent: "codex",
+    status: "complete",
+    resultText: "Changed: Fixed auth test.\nVerified: Ran targeted tests.\nNext: Watch CI.",
+  });
+  store.createSession({
+    id: "error",
+    repo: "git@example.com/repo.git",
+    prompt: "error",
+    agent: "codex",
+    status: "error",
+    error: "permission denied by runtime",
+  });
+
+  const engine = new TeleCoderEngine(makeConfig(dir), store, {
+    async runTask() {
+      return { output: "" };
+    },
+  });
+
+  const response = await handleRequest(
+    engine,
+    new Request("http://telecoder.test/api/inbox?limit=2"),
+  );
+  const body = (await response.json()) as Array<{
+    id: string;
+    outcomeChanged: string;
+    outcomeHeadline: string;
+    outcomeVerified: string;
+  }>;
+  engine.close();
+
+  expect(response.status).toBe(200);
+  expect(body).toHaveLength(2);
+  expect(body.some((session) => session.id === "complete")).toBe(true);
+  expect(body.find((session) => session.id === "complete")?.outcomeChanged).toBe("Fixed auth test.");
+  expect(body.find((session) => session.id === "complete")?.outcomeVerified).toBe(
+    "Ran targeted tests.",
+  );
+  expect(body.find((session) => session.id === "error")?.outcomeHeadline).toContain("Failed:");
+});
+
 test("POST /api/sessions accepts explicit policy mode", async () => {
   const dir = await mkdtemp(join(tmpdir(), "telecoder-server-"));
   cleanup.push(dir);

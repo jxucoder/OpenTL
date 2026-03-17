@@ -32,13 +32,15 @@ Sprint 0 status:
   implemented
 - Sprint 4 CI watches and watch-triggered run history are now implemented
 - Sprint 5 PR review watches and compact return summaries are now implemented
+- an inbox-style outcome surface now exists through structured session
+  outcomes and `GET /api/inbox`
 
 What still does not exist:
 
 - resume-aware multi-turn session ownership on top of `acpx`
 - interactive approval workflows beyond local trust presets
 - authenticated webhook verification and scheduler-based watch sources
-- explicit push and PR creation action surfaces
+- user-mediated approval flows around push and PR creation actions
 
 ## Sprint Sequence
 

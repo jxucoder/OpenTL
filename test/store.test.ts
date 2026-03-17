@@ -54,6 +54,8 @@ test("store persists sessions and events across reopen", async () => {
 
   expect(loaded?.status).toBe("complete");
   expect(loaded?.resultText).toBe("done");
+  expect(loaded?.outcomeHeadline).toBe("done");
+  expect(loaded?.outcomeChanged).toBe("done");
   expect(loaded?.parentSessionId).toBe("parent-0");
   expect(loaded?.attempt).toBe(3);
   expect(loaded?.policyMode).toBe("observe");
@@ -68,6 +70,51 @@ test("store persists sessions and events across reopen", async () => {
   expect(events).toHaveLength(1);
   expect(events[0]?.id).toBe(event.id);
   expect(events[0]?.data).toBe("running acpx");
+});
+
+test("store lists inbox sessions with structured outcomes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "telecoder-store-"));
+  cleanup.push(dir);
+  const dbPath = join(dir, "telecoder.sqlite");
+
+  const store = new TeleCoderStore(dbPath);
+  store.createSession({
+    id: "pending",
+    repo: "git@example.com/repo.git",
+    prompt: "pending",
+    agent: "codex",
+    status: "pending",
+  });
+  store.createSession({
+    id: "complete",
+    repo: "git@example.com/repo.git",
+    prompt: "complete",
+    agent: "codex",
+    status: "complete",
+    resultText: "Changed: Fixed the flaky test.\nVerified: Ran unit tests.\nNext: Monitor CI.",
+  });
+  store.createSession({
+    id: "error",
+    repo: "git@example.com/repo.git",
+    prompt: "error",
+    agent: "codex",
+    status: "error",
+    error: "approval denied",
+  });
+
+  const inbox = store.listInboxSessions(10);
+  const limited = store.listInboxSessions(1);
+  store.close();
+
+  expect(inbox.map((session) => session.id).sort()).toEqual(["complete", "error"]);
+  expect(inbox.find((session) => session.id === "complete")?.outcomeChanged).toBe(
+    "Fixed the flaky test.",
+  );
+  expect(inbox.find((session) => session.id === "complete")?.outcomeVerified).toBe(
+    "Ran unit tests.",
+  );
+  expect(inbox.find((session) => session.id === "error")?.outcomeHeadline).toContain("Failed:");
+  expect(limited).toHaveLength(1);
 });
 
 test("store lists sessions with status, parent, agent, policy, and lineage filters", async () => {

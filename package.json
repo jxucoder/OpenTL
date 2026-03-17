@@ -12,6 +12,7 @@
     "events": "bun src/cli.ts events",
     "lineage": "bun src/cli.ts lineage",
     "list": "bun src/cli.ts list",
+    "inbox": "bun src/cli.ts inbox",
     "config": "bun src/cli.ts config",
     "test": "bun test ./test"
   }

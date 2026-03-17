@@ -1,3 +1,4 @@
+import { deriveSessionOutcome } from "./outcome.ts";
 import { runCommand } from "./process.ts";
 import type {
   CiWatchEvent,
@@ -10,16 +11,14 @@ import type {
   WorkspaceWritePolicy,
 } from "./types.ts";
 
-interface ReturnSections {
-  changed?: string;
-  next?: string;
-  uncertain?: string;
-  verified?: string;
-}
-
 interface ReturnSummarySession {
   agent: string;
   error: string;
+  outcomeChanged: string;
+  outcomeHeadline: string;
+  outcomeNext: string;
+  outcomeUncertain: string;
+  outcomeVerified: string;
   policyMode: TeleCoderPolicyMode;
   resultText: string;
   runtimeCommand: string;
@@ -251,43 +250,36 @@ export function buildPrWatchPrompt(
   return details;
 }
 
-export function summarizeWatchOutcome(session: Pick<SessionRecord, "error" | "resultText" | "status">): string {
-  const sections = parseReturnSections(session.resultText);
-
-  if (session.status === "complete") {
-    const changed = normalizeSectionValue(sections.changed);
-    if (changed) {
-      return changed.slice(0, 280);
-    }
-
-    const text = session.resultText.trim();
-    if (!text) {
-      return "Completed without agent output.";
-    }
-    return text.split("\n")[0]!.slice(0, 280);
-  }
-
-  if (session.status === "error") {
-    return `Failed: ${session.error}`.slice(0, 280);
-  }
-
-  return `Session is ${session.status}.`;
+export function summarizeWatchOutcome(
+  session: Pick<
+    SessionRecord,
+    | "error"
+    | "outcomeChanged"
+    | "outcomeHeadline"
+    | "outcomeNext"
+    | "outcomeUncertain"
+    | "outcomeVerified"
+    | "resultText"
+    | "status"
+  >,
+): string {
+  return getOutcome(session).outcomeHeadline.slice(0, 280);
 }
 
 export function buildWatchReturnSummary(
   triggerSummary: string,
   session: ReturnSummarySession,
 ): string {
-  const sections = parseReturnSections(session.resultText);
-
-  const changed = normalizeSectionValue(sections.changed) ?? fallbackChanged(session);
-  const verified = normalizeSectionValue(sections.verified) ?? "Not explicitly verified.";
+  const outcome = getOutcome(session);
+  const changed = outcome.outcomeChanged || fallbackChanged(session);
+  const verified = outcome.outcomeVerified || "Not explicitly verified.";
   const uncertain =
-    session.status === "error"
-      ? session.error || "Session failed without an explicit error."
-      : normalizeSectionValue(sections.uncertain) ?? "No additional uncertainty reported.";
+    outcome.outcomeUncertain ||
+    (session.status === "error"
+      ? "Session failed without an explicit error."
+      : "No additional uncertainty reported.");
   const next =
-    normalizeSectionValue(sections.next) ??
+    outcome.outcomeNext ||
     (session.status === "complete"
       ? "Review the result and decide whether to act on it."
       : "Inspect the error and rerun or intervene manually.");
@@ -315,75 +307,38 @@ function fallbackChanged(session: Pick<ReturnSummarySession, "resultText" | "sta
   return text.split("\n")[0]!;
 }
 
-function parseReturnSections(text: string): ReturnSections {
-  const sections: ReturnSections = {};
-  let current: keyof ReturnSections | null = null;
-  const buffers: Partial<Record<keyof ReturnSections, string[]>> = {};
-
-  for (const rawLine of text.split("\n")) {
-    const line = rawLine.trim();
-    const heading = parseSectionHeading(line);
-    if (heading) {
-      current = heading.key;
-      buffers[current] = [heading.value];
-      continue;
-    }
-
-    if (!current) {
-      continue;
-    }
-
-    if (!buffers[current]) {
-      buffers[current] = [];
-    }
-    buffers[current]!.push(rawLine.trim());
+function getOutcome(
+  session: Pick<
+    SessionRecord,
+    | "error"
+    | "outcomeChanged"
+    | "outcomeHeadline"
+    | "outcomeNext"
+    | "outcomeUncertain"
+    | "outcomeVerified"
+    | "resultText"
+    | "status"
+  >,
+) {
+  if (
+    session.outcomeHeadline ||
+    session.outcomeChanged ||
+    session.outcomeVerified ||
+    session.outcomeUncertain ||
+    session.outcomeNext
+  ) {
+    return {
+      outcomeHeadline: session.outcomeHeadline,
+      outcomeChanged: session.outcomeChanged,
+      outcomeVerified: session.outcomeVerified,
+      outcomeUncertain: session.outcomeUncertain,
+      outcomeNext: session.outcomeNext,
+    };
   }
 
-  for (const key of Object.keys(buffers) as Array<keyof ReturnSections>) {
-    const value = normalizeSectionValue(buffers[key]!.join("\n"));
-    if (value) {
-      sections[key] = value;
-    }
-  }
-
-  return sections;
-}
-
-function parseSectionHeading(
-  line: string,
-): { key: keyof ReturnSections; value: string } | null {
-  const match = line.match(/^(Changed|Verified|Uncertain|Next):\s*(.*)$/i);
-  if (!match) {
-    return null;
-  }
-
-  const label = match[1]!.toLowerCase();
-  const value = match[2] ?? "";
-
-  switch (label) {
-    case "changed":
-      return { key: "changed", value };
-    case "verified":
-      return { key: "verified", value };
-    case "uncertain":
-      return { key: "uncertain", value };
-    case "next":
-      return { key: "next", value };
-    default:
-      return null;
-  }
-}
-
-function normalizeSectionValue(raw: string | undefined): string | undefined {
-  if (!raw) {
-    return undefined;
-  }
-
-  const normalized = raw
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .join(" ");
-
-  return normalized || undefined;
+  return deriveSessionOutcome({
+    status: session.status,
+    resultText: session.resultText,
+    error: session.error,
+  });
 }
